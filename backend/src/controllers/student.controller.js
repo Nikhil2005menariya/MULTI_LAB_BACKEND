@@ -9,6 +9,9 @@ const Student = require('../models/Student');
 const ComponentRequest = require('../models/ComponentRequest');
 const { sendMail } = require('../services/mail.service');
 
+/* ============================
+   GET ALL ITEMS
+============================ */
 exports.getAllItems = async (req, res) => {
   try {
     const items = await Item.find(
@@ -25,12 +28,14 @@ exports.getAllItems = async (req, res) => {
     ).sort({ name: 1 });
 
     res.json({ success: true, data: items });
-
-  } catch (err) {
+  } catch {
     res.status(500).json({ error: 'Failed to load items' });
   }
 };
 
+/* ============================
+   GET ITEM LABS
+============================ */
 exports.getItemLabs = async (req, res) => {
   try {
     const { item_id } = req.params;
@@ -43,12 +48,14 @@ exports.getItemLabs = async (req, res) => {
       .lean();
 
     res.json({ success: true, data: inventories });
-
   } catch (err) {
-    res.status(500).json({ error: 'Failed to load lab availability' +err});
+    res.status(500).json({ error: err.message });
   }
 };
 
+/* ============================
+   RAISE TRANSACTION
+============================ */
 exports.raiseTransaction = async (req, res) => {
   const session = await mongoose.startSession();
 
@@ -61,13 +68,17 @@ exports.raiseTransaction = async (req, res) => {
       project_name
     } = req.body;
 
-    if (!items || !Array.isArray(items) || items.length === 0) {
+    if (!items?.length) {
       return res.status(400).json({ error: 'No items selected' });
     }
 
-    if (!faculty_email || !faculty_id || !expected_return_date || !project_name) {
+    if (!project_name?.trim()) {
+      return res.status(400).json({ error: 'Project name is required' });
+    }
+
+    if (!faculty_email || !faculty_id || !expected_return_date) {
       return res.status(400).json({
-        error: 'Project name, faculty details and return date required'
+        error: 'Faculty details and return date required'
       });
     }
 
@@ -76,10 +87,9 @@ exports.raiseTransaction = async (req, res) => {
       return res.status(404).json({ error: 'Student not found' });
     }
 
-    // Block active transactions
     const existingTxn = await Transaction.findOne({
       student_id: student._id,
-      status: { $in: ['raised', 'approved', 'active', 'overdue'] }
+      status: { $in: ['raised','approved','active','overdue'] }
     });
 
     if (existingTxn) {
@@ -95,26 +105,26 @@ exports.raiseTransaction = async (req, res) => {
     for (const reqItem of items) {
       const { item_id, lab_id, quantity } = reqItem;
 
-      const item = await Item.findById(item_id).session(session);
-      if (!item || !item.is_active) {
-        throw new Error('Invalid item selected');
+      if (!quantity || quantity <= 0) {
+        throw new Error('Invalid quantity');
       }
 
+      const item = await Item.findById(item_id).session(session);
       const labInventory = await LabInventory.findOne({
         lab_id,
         item_id,
         available_quantity: { $gte: quantity }
       }).session(session);
 
-      if (!labInventory) {
-        throw new Error(`Insufficient stock in selected lab`);
+      if (!item || !item.is_active || !labInventory) {
+        throw new Error('Insufficient stock in selected lab');
       }
 
-      // TEMP RESERVE (LAB LEVEL)
+      // TEMP RESERVE LAB
       labInventory.reserved_quantity += quantity;
       await labInventory.save({ session });
 
-      // TEMP RESERVE (GLOBAL)
+      // TEMP RESERVE GLOBAL
       item.temp_reserved_quantity += quantity;
       await item.save({ session });
 
@@ -132,22 +142,19 @@ exports.raiseTransaction = async (req, res) => {
     const approvalToken =
       crypto.randomBytes(32).toString('hex');
 
-    const approvalLink =
-      `${process.env.FRONTEND_URL}/faculty/approve?token=${approvalToken}`;
-
     await sendMail({
       to: faculty_email,
       subject: 'IoT Lab Borrow Approval',
       html: `
         <p><b>${student.name}</b> requested components.</p>
-        <p>Transaction ID: <b>${transactionId}</b></p>
-        <p>Project: <b>${project_name}</b></p>
-        <a href="${approvalLink}">Approve</a>
+        <p><b>Project:</b> ${project_name}</p>
+        <p><b>Transaction ID:</b> ${transactionId}</p>
       `
     });
 
     const transaction = await Transaction.create([{
       transaction_id: transactionId,
+      project_name: project_name.trim(),
       student_id: student._id,
       student_reg_no: student.reg_no,
       faculty_email,
@@ -175,11 +182,14 @@ exports.raiseTransaction = async (req, res) => {
     session.endSession();
 
     return res.status(400).json({
-      error: err.message || 'Failed to raise transaction'
+      error: err.message
     });
   }
 };
 
+/* ============================
+   GET MY TRANSACTIONS
+============================ */
 exports.getMyTransactions = async (req, res) => {
   try {
     const transactions = await Transaction.find({
@@ -191,12 +201,14 @@ exports.getMyTransactions = async (req, res) => {
       .sort({ createdAt: -1 });
 
     res.json({ success: true, data: transactions });
-
-  } catch (err) {
+  } catch {
     res.status(500).json({ error: 'Failed to load transactions' });
   }
 };
 
+/* ============================
+   GET TRANSACTION BY ID
+============================ */
 exports.getTransactionById = async (req, res) => {
   try {
     const transaction = await Transaction.findOne({
@@ -212,69 +224,14 @@ exports.getTransactionById = async (req, res) => {
     }
 
     res.json({ success: true, data: transaction });
-
-  } catch (err) {
+  } catch {
     res.status(500).json({ error: 'Failed to fetch transaction' });
   }
 };
 
-exports.requestComponent = async (req, res) => {
-  try {
-    const {
-      lab_id,
-      component_name,
-      category,
-      quantity_requested,
-      use_case,
-      urgency
-    } = req.body;
-
-    const student = await Student.findById(req.user.id);
-
-    const lab = await mongoose.model('Lab').findById(lab_id);
-
-    const request = await ComponentRequest.create({
-      lab_id,
-      lab_name_snapshot: lab.name,
-      student_id: student._id,
-      student_reg_no: student.reg_no,
-      student_email: student.email,
-      component_name,
-      category,
-      quantity_requested,
-      use_case,
-      urgency: urgency || 'medium',
-      status: 'pending'
-    });
-
-    res.status(201).json({ success: true, data: request });
-
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to submit request' });
-  }
-};
-
-
-exports.getMyComponentRequests = async (req, res) => {
-  try {
-    const requests = await ComponentRequest.find({
-      student_id: req.user.id
-    }).sort({ createdAt: -1 });
-
-    res.json({
-      success: true,
-      data: requests
-    });
-  } catch (err) {
-    res.status(500).json({
-      error: 'Failed to fetch component requests'
-    });
-  }
-};
-
-
-
-
+/* ============================
+   EXTEND RETURN DATE
+============================ */
 exports.extendReturnDate = async (req, res) => {
   try {
     const { transaction_id } = req.params;
@@ -297,22 +254,15 @@ exports.extendReturnDate = async (req, res) => {
       });
     }
 
-    // 🔒 Must be active
     if (transaction.status !== 'active') {
       return res.status(400).json({
         error: 'Only active transactions can be extended'
       });
     }
 
-    if (!transaction.issued_at) {
+    if (!transaction.issued_at || transaction.actual_return_date) {
       return res.status(400).json({
-        error: 'Transaction not yet issued'
-      });
-    }
-
-    if (transaction.actual_return_date) {
-      return res.status(400).json({
-        error: 'Transaction already completed'
+        error: 'Transaction not eligible for extension'
       });
     }
 
@@ -321,11 +271,10 @@ exports.extendReturnDate = async (req, res) => {
 
     if (requestedDate <= transaction.expected_return_date) {
       return res.status(400).json({
-        error: 'New return date must be greater than current expected date'
+        error: 'New return date must be later than current date'
       });
     }
 
-    // 🔥 Maximum allowed = issued_at + 2 months
     const maxAllowedDate = new Date(issuedAt);
     maxAllowedDate.setMonth(maxAllowedDate.getMonth() + 2);
 
@@ -340,14 +289,93 @@ exports.extendReturnDate = async (req, res) => {
 
     return res.json({
       success: true,
-      message: 'Return date extended successfully',
       new_expected_return_date: transaction.expected_return_date
     });
 
   } catch (err) {
-    console.error('Extend return date error:', err);
     return res.status(500).json({
       error: 'Failed to extend return date'
+    });
+  }
+};
+
+
+
+exports.requestComponent = async (req, res) => {
+  try {
+    const {
+      lab_id,
+      component_name,
+      category,
+      quantity_requested,
+      use_case,
+      urgency
+    } = req.body;
+
+    if (!lab_id || !component_name || !quantity_requested || !use_case) {
+      return res.status(400).json({
+        error: 'Missing required fields'
+      });
+    }
+
+    const student = await Student.findById(req.user.id);
+    if (!student) {
+      return res.status(404).json({
+        error: 'Student not found'
+      });
+    }
+
+    const lab = await Lab.findById(lab_id);
+    if (!lab) {
+      return res.status(404).json({
+        error: 'Lab not found'
+      });
+    }
+
+    const request = await ComponentRequest.create({
+      lab_id,
+      lab_name_snapshot: lab.name,
+      student_id: student._id,
+      student_reg_no: student.reg_no,
+      student_email: student.email,
+      component_name,
+      category,
+      quantity_requested,
+      use_case,
+      urgency: urgency || 'medium',
+      status: 'pending'
+    });
+
+    return res.status(201).json({
+      success: true,
+      data: request
+    });
+
+  } catch (err) {
+    return res.status(500).json({
+      error: 'Failed to submit request'
+    });
+  }
+};
+
+
+exports.getMyComponentRequests = async (req, res) => {
+  try {
+    const requests = await ComponentRequest.find({
+      student_id: req.user.id
+    })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    return res.json({
+      success: true,
+      count: requests.length,
+      data: requests
+    });
+
+  } catch (err) {
+    return res.status(500).json({
+      error: 'Failed to fetch component requests'
     });
   }
 };

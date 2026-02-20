@@ -60,8 +60,11 @@ exports.getApprovalDetails = async (req, res) => {
     const transaction = await Transaction.findOne({
       'faculty_approval.approval_token': token,
       status: 'raised'
-    }).populate('student_id', 'name reg_no email')
-      .populate('items.item_id', 'name sku tracking_type');
+    })
+      .select('+project_name')
+      .populate('student_id', 'name reg_no email')
+      .populate('items.item_id', 'name sku tracking_type')
+      .lean();
 
     if (!transaction) {
       return res.status(400).json({ error: 'Invalid or expired approval token' });
@@ -76,7 +79,6 @@ exports.getApprovalDetails = async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 };
-
 
 /* ============================
    REJECT VIA EMAIL TOKEN
@@ -378,6 +380,7 @@ exports.getAllTransactions = async (req, res) => {
       faculty_email: faculty.email,
       faculty_id: faculty.faculty_id
     })
+      .select('+project_name')
       .populate('student_id', 'name reg_no email')
       .populate('items.item_id', 'name sku tracking_type')
       .populate('issued_by_incharge_id', 'name email')
@@ -391,7 +394,6 @@ exports.getAllTransactions = async (req, res) => {
     });
 
   } catch (err) {
-    console.error('Faculty transactions error:', err);
     res.status(500).json({ error: 'Failed to fetch transactions' });
   }
 };
@@ -410,6 +412,7 @@ exports.getPendingTransactions = async (req, res) => {
       faculty_id: faculty.faculty_id,
       status: 'raised'
     })
+      .select('+project_name')
       .populate('student_id', 'name reg_no email')
       .populate('items.item_id', 'name sku tracking_type')
       .sort({ createdAt: -1 })
@@ -422,7 +425,6 @@ exports.getPendingTransactions = async (req, res) => {
     });
 
   } catch (err) {
-    console.error('Pending transactions error:', err);
     res.status(500).json({ error: 'Failed to fetch pending transactions' });
   }
 };
@@ -444,6 +446,7 @@ exports.getTransactionDetails = async (req, res) => {
       faculty_email: faculty.email,
       faculty_id: faculty.faculty_id
     })
+      .select('+project_name')
       .populate('student_id', 'name reg_no email')
       .populate('items.item_id', 'name sku tracking_type')
       .populate('issued_by_incharge_id', 'name email')
@@ -461,7 +464,6 @@ exports.getTransactionDetails = async (req, res) => {
     });
 
   } catch (err) {
-    console.error('Transaction details error:', err);
     res.status(500).json({ error: 'Failed to fetch transaction details' });
   }
 };
@@ -477,8 +479,9 @@ exports.getTransactionHistory = async (req, res) => {
     const transactions = await Transaction.find({
       faculty_email: faculty.email,
       faculty_id: faculty.faculty_id,
-      status: { $in: ['approved', 'active', 'completed', 'overdue', 'rejected'] }
+      status: { $in: ['approved','active','completed','overdue','rejected'] }
     })
+      .select('+project_name')
       .populate('student_id', 'name reg_no email')
       .populate('items.item_id', 'name sku tracking_type')
       .sort({ updatedAt: -1 })
@@ -491,7 +494,6 @@ exports.getTransactionHistory = async (req, res) => {
     });
 
   } catch (err) {
-    console.error('History fetch error:', err);
     res.status(500).json({ error: 'Failed to fetch transaction history' });
   }
 };

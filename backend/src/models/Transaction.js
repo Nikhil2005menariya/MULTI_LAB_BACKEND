@@ -77,6 +77,12 @@ const transactionSchema = new mongoose.Schema(
       unique: true,
       index: true
     },
+      project_name: {
+      type: String,
+      required: true,
+      trim: true,
+      index: true
+    },
 
     /* =====================
        TYPE
