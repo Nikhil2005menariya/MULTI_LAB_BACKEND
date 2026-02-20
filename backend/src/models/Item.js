@@ -1,5 +1,15 @@
 const mongoose = require('mongoose');
 
+const purchaseBatchSchema = new mongoose.Schema(
+  {
+    vendor: { type: String, required: true },
+    quantity_added: { type: Number, required: true },
+    purchase_date: { type: Date, default: Date.now },
+    invoice_number: String
+  },
+  { _id: false }
+);
+
 const itemSchema = new mongoose.Schema(
   {
     name: { type: String, required: true },
@@ -12,19 +22,7 @@ const itemSchema = new mongoose.Schema(
     },
 
     category: String,
-    vendor: String,
-    location: String,
     description: String,
-
-    /* =========================
-       LAB SUPPORT
-    ========================= */
-    lab_id: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Lab',
-      required: true,
-      index: true
-    },
 
     /* =========================
        STUDENT VISIBILITY
@@ -36,21 +34,18 @@ const itemSchema = new mongoose.Schema(
     },
 
     /* =========================
-       INVENTORY COUNTS
+       INVENTORY COUNTS (GLOBAL TOTAL)
     ========================= */
-
-    initial_quantity: {
+    total_quantity: {
       type: Number,
-      required: true
+      default: 0
     },
 
-    // REAL STOCK (only changes on issue/return)
     available_quantity: {
       type: Number,
-      required: true
+      default: 0
     },
 
-    // 🔥 NEW — Temporary reservation
     temp_reserved_quantity: {
       type: Number,
       default: 0
@@ -61,43 +56,26 @@ const itemSchema = new mongoose.Schema(
       default: 0
     },
 
-    total_quantity: {
-      type: Number,
-      default: function () {
-        return this.initial_quantity;
-      }
-    },
-
-    last_asset_seq: {
-      type: Number,
-      default: 0
-    },
-
-    min_threshold_quantity: {
-      type: Number,
-      default: 5
-    },
-
-    is_active: {
-      type: Boolean,
-      default: true
-    },
+    purchase_batches: [purchaseBatchSchema],
 
     tracking_type: {
       type: String,
       enum: ['bulk', 'asset'],
       required: true,
       default: 'bulk'
+    },
+
+    is_active: {
+      type: Boolean,
+      default: true
     }
   },
   { timestamps: true }
 );
 
 /* =========================
-   VIRTUAL FIELD
+   STUDENT VISIBLE QUANTITY
 ========================= */
-
-// 🔥 What students actually see
 itemSchema.virtual('student_visible_quantity').get(function () {
   return this.available_quantity - this.temp_reserved_quantity;
 });
