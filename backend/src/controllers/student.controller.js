@@ -1,17 +1,18 @@
+const mongoose = require('mongoose');
 const crypto = require('crypto');
+
 const Transaction = require('../models/Transaction');
 const Item = require('../models/Item');
+const Lab = require('../models/Lab');
+const LabInventory = require('../models/LabInventory');
 const Student = require('../models/Student');
+const ComponentRequest = require('../models/ComponentRequest');
 const { sendMail } = require('../services/mail.service');
-const ComponentRequest = require("../models/ComponentRequest");
 
-
-
-// GET AVAILABLE ITEMS FOR STUDENT
-exports.getAvailableItemsForStudent = async (req, res) => {
+exports.getAllItems = async (req, res) => {
   try {
     const items = await Item.find(
-      { is_active: true },
+      { is_active: true, is_student_visible: true },
       {
         name: 1,
         sku: 1,
@@ -19,172 +20,133 @@ exports.getAvailableItemsForStudent = async (req, res) => {
         description: 1,
         tracking_type: 1,
         available_quantity: 1,
-        total_quantity: 1,          // ✅ REQUIRED
-        min_threshold_quantity: 1   // ✅ REQUIRED (low-stock UI)
+        temp_reserved_quantity: 1
       }
     ).sort({ name: 1 });
 
-    res.json({
-      success: true,
-      data: items
-    });
+    res.json({ success: true, data: items });
+
   } catch (err) {
-    console.error('STUDENT ITEMS ERROR:', err);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to load available items'
-    });
+    res.status(500).json({ error: 'Failed to load items' });
   }
 };
 
+exports.getItemLabs = async (req, res) => {
+  try {
+    const { item_id } = req.params;
 
+    const inventories = await LabInventory.find({
+      item_id,
+      available_quantity: { $gt: 0 }
+    })
+      .populate('lab_id', 'name code location')
+      .lean();
 
-/* ============================
-   RAISE TRANSACTION (FINAL)
-============================ */
+    res.json({ success: true, data: inventories });
+
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to load lab availability' +err});
+  }
+};
+
 exports.raiseTransaction = async (req, res) => {
+  const session = await mongoose.startSession();
+
   try {
     const {
       items,
       faculty_email,
       faculty_id,
-      expected_return_date
+      expected_return_date,
+      project_name
     } = req.body;
 
-    /* ============================
-       BASIC VALIDATION
-    ============================ */
     if (!items || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: 'No items selected' });
     }
 
-    if (!faculty_email || !faculty_id || !expected_return_date) {
+    if (!faculty_email || !faculty_id || !expected_return_date || !project_name) {
       return res.status(400).json({
-        error: 'Faculty details and expected return date are required'
+        error: 'Project name, faculty details and return date required'
       });
     }
 
-    // ✅ Faculty email domain check
-    if (!faculty_email.endsWith('@vit.ac.in')) {
-      return res.status(400).json({
-        error: 'Faculty email must be a valid @vit.ac.in address'
-      });
-    }
-
-    /* ============================
-       FETCH STUDENT
-    ============================ */
     const student = await Student.findById(req.user.id);
-
     if (!student || !student.is_active) {
-      return res.status(404).json({ error: 'Student not found or inactive' });
+      return res.status(404).json({ error: 'Student not found' });
     }
 
-    /* ============================
-       BLOCK MULTIPLE TRANSACTIONS
-    ============================ */
+    // Block active transactions
     const existingTxn = await Transaction.findOne({
       student_id: student._id,
       status: { $in: ['raised', 'approved', 'active', 'overdue'] }
-    }).sort({ createdAt: -1 });
+    });
 
     if (existingTxn) {
-      if (existingTxn.status === 'raised') {
-        return res.status(409).json({
-          error: 'You already have a pending request awaiting faculty approval'
-        });
-      }
-
-      if (existingTxn.status === 'approved' || existingTxn.status === 'active') {
-        return res.status(409).json({
-          error: 'You already have an active transaction. Return items before raising a new request'
-        });
-      }
-
-      if (existingTxn.status === 'overdue') {
-        return res.status(409).json({
-          error: 'You have overdue components. Please clear overdue before raising a new request'
-        });
-      }
+      return res.status(409).json({
+        error: 'You already have an active or pending transaction'
+      });
     }
 
-    /* ============================
-       VALIDATE INVENTORY REQUEST
-    ============================ */
+    session.startTransaction();
+
+    const normalizedItems = [];
+
     for (const reqItem of items) {
-      const item = await Item.findById(reqItem.item_id);
+      const { item_id, lab_id, quantity } = reqItem;
 
+      const item = await Item.findById(item_id).session(session);
       if (!item || !item.is_active) {
-        return res.status(400).json({
-          error: 'Invalid or inactive item selected'
-        });
+        throw new Error('Invalid item selected');
       }
 
-      if (!reqItem.quantity || reqItem.quantity <= 0) {
-        return res.status(400).json({
-          error: `Quantity required for ${item.name}`
-        });
+      const labInventory = await LabInventory.findOne({
+        lab_id,
+        item_id,
+        available_quantity: { $gte: quantity }
+      }).session(session);
+
+      if (!labInventory) {
+        throw new Error(`Insufficient stock in selected lab`);
       }
 
-      // BULK ITEMS
-      if (item.tracking_type === 'bulk') {
-        const usableQty =
-          item.available_quantity - item.reserved_quantity;
+      // TEMP RESERVE (LAB LEVEL)
+      labInventory.reserved_quantity += quantity;
+      await labInventory.save({ session });
 
-        if (usableQty < reqItem.quantity) {
-          return res.status(400).json({
-            error: `Insufficient quantity for ${item.name}`
-          });
-        }
-      }
+      // TEMP RESERVE (GLOBAL)
+      item.temp_reserved_quantity += quantity;
+      await item.save({ session });
 
-      // ASSET ITEMS → validated later by in-charge
+      normalizedItems.push({
+        lab_id,
+        item_id,
+        quantity,
+        asset_ids: []
+      });
     }
 
-    /* ============================
-       GENERATE IDS
-    ============================ */
     const transactionId =
       'TXN-' + crypto.randomBytes(4).toString('hex').toUpperCase();
 
     const approvalToken =
       crypto.randomBytes(32).toString('hex');
 
-    /* ============================
-       NORMALIZE ITEMS
-    ============================ */
-    const normalizedItems = items.map(i => ({
-      item_id: i.item_id,
-      quantity: i.quantity,
-      asset_tags: []
-    }));
-
-    /* ============================
-       SEND FACULTY EMAIL FIRST
-       (DO NOT CREATE TXN IF MAIL FAILS)
-    ============================ */
     const approvalLink =
       `${process.env.FRONTEND_URL}/faculty/approve?token=${approvalToken}`;
 
     await sendMail({
       to: faculty_email,
-      subject: 'IoT Lab Component Borrow Approval',
+      subject: 'IoT Lab Borrow Approval',
       html: `
-        <p>
-          Student <b>${student.name}</b>
-          (Reg No: <b>${student.reg_no}</b>)
-          has requested lab components.
-        </p>
+        <p><b>${student.name}</b> requested components.</p>
         <p>Transaction ID: <b>${transactionId}</b></p>
-        <p>Expected Return Date: <b>${new Date(expected_return_date).toDateString()}</b></p>
-        <a href="${approvalLink}">Approve Request</a>
+        <p>Project: <b>${project_name}</b></p>
+        <a href="${approvalLink}">Approve</a>
       `
     });
 
-    /* ============================
-       CREATE TRANSACTION
-    ============================ */
-    await Transaction.create({
+    const transaction = await Transaction.create([{
       transaction_id: transactionId,
       student_id: student._id,
       student_reg_no: student.reg_no,
@@ -197,74 +159,69 @@ exports.raiseTransaction = async (req, res) => {
         approved: false,
         approval_token: approvalToken
       }
-    });
+    }], { session });
+
+    await session.commitTransaction();
+    session.endSession();
 
     return res.status(201).json({
       success: true,
       transaction_id: transactionId,
-      message: 'Transaction raised successfully and sent for faculty approval'
+      data: transaction[0]
     });
 
   } catch (err) {
-    console.error('Raise transaction error:', err);
-    return res.status(500).json({
-      error: 'Failed to raise transaction. Please try again later.'
+    await session.abortTransaction();
+    session.endSession();
+
+    return res.status(400).json({
+      error: err.message || 'Failed to raise transaction'
     });
   }
 };
-
-
-
-/* ============================
-   STUDENT TRANSACTION HISTORY
-============================ */
 
 exports.getMyTransactions = async (req, res) => {
   try {
     const transactions = await Transaction.find({
       student_id: req.user.id
-    }).sort({ createdAt: -1 });
+    })
+      .populate('items.item_id', 'name sku tracking_type')
+      .populate('items.lab_id', 'name code')
+      .populate('items.asset_ids', 'asset_tag serial_no')
+      .sort({ createdAt: -1 });
 
     res.json({ success: true, data: transactions });
+
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Failed to load transactions' });
   }
 };
-
-/* ============================
-   TRACK TRANSACTION BY ID
-============================ */
 
 exports.getTransactionById = async (req, res) => {
   try {
     const transaction = await Transaction.findOne({
       transaction_id: req.params.transaction_id,
       student_id: req.user.id
-    }).populate('items.item_id', 'name sku');
+    })
+      .populate('items.item_id', 'name sku tracking_type')
+      .populate('items.lab_id', 'name code location')
+      .populate('items.asset_ids', 'asset_tag serial_no');
 
     if (!transaction) {
       return res.status(404).json({ error: 'Transaction not found' });
     }
 
     res.json({ success: true, data: transaction });
+
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Failed to fetch transaction' });
   }
 };
 
-
-//component request 
-
-
-/* ============================
-   STUDENT: REQUEST COMPONENT
-============================ */
-/* ============================
-   CREATE COMPONENT REQUEST
-============================ */
 exports.requestComponent = async (req, res) => {
   try {
     const {
+      lab_id,
       component_name,
       category,
       quantity_requested,
@@ -272,76 +229,125 @@ exports.requestComponent = async (req, res) => {
       urgency
     } = req.body;
 
-    if (!component_name || !quantity_requested || !use_case) {
-      return res.status(400).json({
-        message: 'Missing required fields'
-      });
-    }
-
-    /* ============================
-       FETCH STUDENT (FROM TOKEN)
-    ============================ */
     const student = await Student.findById(req.user.id);
 
-    if (!student || !student.is_active) {
-      return res.status(404).json({
-        message: 'Student not found'
-      });
-    }
+    const lab = await mongoose.model('Lab').findById(lab_id);
 
-    /* ============================
-       CREATE REQUEST
-    ============================ */
     const request = await ComponentRequest.create({
+      lab_id,
+      lab_name_snapshot: lab.name,
+      student_id: student._id,
+      student_reg_no: student.reg_no,
+      student_email: student.email,
       component_name,
       category,
       quantity_requested,
       use_case,
       urgency: urgency || 'medium',
-
-      // 🔥 REQUIRED FIELDS — FIX
-      student_id: student._id,
-      student_reg_no: student.reg_no,
-      student_email: student.email,
-
       status: 'pending'
     });
 
-    return res.status(201).json({
-      success: true,
-      message: 'Component request submitted successfully',
-      data: request
-    });
+    res.status(201).json({ success: true, data: request });
 
   } catch (err) {
-    console.error('Component request error:', err);
-    return res.status(500).json({
-      message: 'Failed to submit component request'
+    res.status(500).json({ error: 'Failed to submit request' });
+  }
+};
+
+
+exports.getMyComponentRequests = async (req, res) => {
+  try {
+    const requests = await ComponentRequest.find({
+      student_id: req.user.id
+    }).sort({ createdAt: -1 });
+
+    res.json({
+      success: true,
+      data: requests
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: 'Failed to fetch component requests'
     });
   }
 };
 
 
-/* ============================
-   GET STUDENT REQUESTS
-============================ */
-exports.getMyComponentRequests = async (req, res) => {
-  try {
-    const requests = await ComponentRequest.find({
-      student_id: req.user.id
-    })
-      .sort({ createdAt: -1 })
-      .lean();
 
-    res.json({
-      success: true,
-      count: requests.length,
-      data: requests
+
+exports.extendReturnDate = async (req, res) => {
+  try {
+    const { transaction_id } = req.params;
+    const { new_return_date } = req.body;
+
+    if (!new_return_date) {
+      return res.status(400).json({
+        error: 'New return date is required'
+      });
+    }
+
+    const transaction = await Transaction.findOne({
+      transaction_id,
+      student_id: req.user.id
     });
+
+    if (!transaction) {
+      return res.status(404).json({
+        error: 'Transaction not found'
+      });
+    }
+
+    // 🔒 Must be active
+    if (transaction.status !== 'active') {
+      return res.status(400).json({
+        error: 'Only active transactions can be extended'
+      });
+    }
+
+    if (!transaction.issued_at) {
+      return res.status(400).json({
+        error: 'Transaction not yet issued'
+      });
+    }
+
+    if (transaction.actual_return_date) {
+      return res.status(400).json({
+        error: 'Transaction already completed'
+      });
+    }
+
+    const issuedAt = new Date(transaction.issued_at);
+    const requestedDate = new Date(new_return_date);
+
+    if (requestedDate <= transaction.expected_return_date) {
+      return res.status(400).json({
+        error: 'New return date must be greater than current expected date'
+      });
+    }
+
+    // 🔥 Maximum allowed = issued_at + 2 months
+    const maxAllowedDate = new Date(issuedAt);
+    maxAllowedDate.setMonth(maxAllowedDate.getMonth() + 2);
+
+    if (requestedDate > maxAllowedDate) {
+      return res.status(400).json({
+        error: 'Return date cannot exceed 2 months from issue date'
+      });
+    }
+
+    transaction.expected_return_date = requestedDate;
+    await transaction.save();
+
+    return res.json({
+      success: true,
+      message: 'Return date extended successfully',
+      new_expected_return_date: transaction.expected_return_date
+    });
+
   } catch (err) {
-    console.error('Fetch student requests error:', err);
-    res.status(500).json({
-      message: 'Failed to fetch requests'
+    console.error('Extend return date error:', err);
+    return res.status(500).json({
+      error: 'Failed to extend return date'
     });
   }
 };

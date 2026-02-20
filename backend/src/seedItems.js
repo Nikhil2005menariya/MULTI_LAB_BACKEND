@@ -3,211 +3,147 @@ const mongoose = require('mongoose');
 
 const Lab = require('./models/Lab');
 const Item = require('./models/Item');
-const ItemAsset = require('./models/ItemAsset');
 const LabInventory = require('./models/LabInventory');
+const ItemAsset = require('./models/ItemAsset');
 
 const MONGO_URI = process.env.MONGO_URI;
 
-const seed = async () => {
+const seedInventory = async () => {
   try {
     await mongoose.connect(MONGO_URI);
     console.log('MongoDB connected');
 
     const labs = await Lab.find();
-
-    const [iotLab, eceLab, roboticsLab] = labs;
+    if (labs.length === 0) {
+      throw new Error('No labs found. Run lab seed first.');
+    }
 
     /* =====================================
-       HELPER: CREATE GLOBAL ITEM
+       1️⃣ CREATE GLOBAL ITEMS
     ===================================== */
-    const createItemIfNotExists = async ({ name, sku, category, tracking_type }) => {
-      let item = await Item.findOne({ sku });
+
+    const itemsData = [
+      {
+        name: 'Arduino Uno',
+        sku: 'ARD-UNO-001',
+        category: 'Microcontroller',
+        tracking_type: 'bulk'
+      },
+      {
+        name: 'Raspberry Pi 4',
+        sku: 'RPI-4-002',
+        category: 'Single Board Computer',
+        tracking_type: 'bulk'
+      },
+      {
+        name: 'Digital Oscilloscope',
+        sku: 'OSC-DSO-003',
+        category: 'Measurement Equipment',
+        tracking_type: 'asset'
+      }
+    ];
+
+    const createdItems = [];
+
+    for (const data of itemsData) {
+      let item = await Item.findOne({ sku: data.sku });
 
       if (!item) {
         item = await Item.create({
-          name,
-          sku,
-          category,
-          tracking_type,
-          initial_quantity: 0,
+          ...data,
+          total_quantity: 0,
           available_quantity: 0,
-          total_quantity: 0
+          temp_reserved_quantity: 0,
+          damaged_quantity: 0
         });
-
-        console.log(`✅ Global Item Created: ${name}`);
+        console.log(`✅ Created Item: ${data.name}`);
+      } else {
+        console.log(`⚠️ Item already exists: ${data.name}`);
       }
 
-      return item;
-    };
+      createdItems.push(item);
+    }
 
     /* =====================================
-       HELPER: ADD BULK STOCK TO LAB
+       2️⃣ DISTRIBUTE STOCK PER LAB
     ===================================== */
-    const addBulkStockToLab = async ({
-      lab,
-      item,
-      quantity,
-      vendor
-    }) => {
 
-      let inventory = await LabInventory.findOne({
-        lab_id: lab._id,
-        item_id: item._id
-      });
+    for (const lab of labs) {
+      for (const item of createdItems) {
 
-      if (!inventory) {
-        inventory = await LabInventory.create({
+        let quantity = 0;
+
+        if (item.tracking_type === 'bulk') {
+          quantity = 10; // 10 per lab for bulk
+        } else {
+          quantity = 2; // 2 assets per lab
+        }
+
+        let labInv = await LabInventory.findOne({
           lab_id: lab._id,
-          item_id: item._id,
-          total_quantity: quantity,
-          available_quantity: quantity
+          item_id: item._id
         });
-      } else {
-        inventory.total_quantity += quantity;
-        inventory.available_quantity += quantity;
-        await inventory.save();
-      }
 
-      // Update global counts
-      item.total_quantity += quantity;
-      item.available_quantity += quantity;
-
-      item.purchase_batches.push({
-        vendor,
-        quantity_added: quantity,
-        invoice_number: `INV-${Math.floor(Math.random() * 10000)}`
-      });
-
-      await item.save();
-
-      console.log(`   ↳ ${quantity} units added to ${lab.name}`);
-    };
-
-    /* =====================================
-       HELPER: ADD ASSET STOCK
-    ===================================== */
-    const addAssetStockToLab = async ({
-      lab,
-      item,
-      count,
-      vendor
-    }) => {
-
-      let inventory = await LabInventory.findOne({
-        lab_id: lab._id,
-        item_id: item._id
-      });
-
-      if (!inventory) {
-        inventory = await LabInventory.create({
-          lab_id: lab._id,
-          item_id: item._id,
-          total_quantity: count,
-          available_quantity: count
-        });
-      } else {
-        inventory.total_quantity += count;
-        inventory.available_quantity += count;
-        await inventory.save();
-      }
-
-      for (let i = 0; i < count; i++) {
-        const assetTag = `${item.sku}-${lab.code}-${String(i + 1).padStart(4, '0')}`;
-
-        const exists = await ItemAsset.findOne({ asset_tag: assetTag });
-        if (!exists) {
-          await ItemAsset.create({
+        if (!labInv) {
+          await LabInventory.create({
+            lab_id: lab._id,
             item_id: item._id,
-            asset_tag: assetTag,
-            vendor,
-            serial_no: `SN-${Math.floor(Math.random()*100000)}`,
-            location: lab.name
+            total_quantity: quantity,
+            available_quantity: quantity,
+            reserved_quantity: 0,
+            damaged_quantity: 0
           });
+
+          console.log(`✅ Stock added: ${item.name} → ${lab.name}`);
+        }
+
+        // Update global totals
+        await Item.updateOne(
+          { _id: item._id },
+          {
+            $inc: {
+              total_quantity: quantity,
+              available_quantity: quantity
+            }
+          }
+        );
+
+        /* =====================================
+           3️⃣ CREATE ASSETS (ONLY FOR ASSET ITEMS)
+        ===================================== */
+        if (item.tracking_type === 'asset') {
+
+          for (let i = 1; i <= quantity; i++) {
+
+            const assetTag = `${item.sku}-${lab.code}-${i}`;
+
+            const existingAsset = await ItemAsset.findOne({ asset_tag: assetTag });
+
+            if (!existingAsset) {
+              await ItemAsset.create({
+                lab_id: lab._id,
+                item_id: item._id,
+                asset_tag: assetTag,
+                vendor: 'Tektronix',
+                status: 'available',
+                condition: 'good',
+                location: lab.name
+              });
+            }
+          }
+
+          console.log(`✅ Assets created for ${item.name} in ${lab.name}`);
         }
       }
+    }
 
-      item.total_quantity += count;
-      item.available_quantity += count;
-
-      await item.save();
-
-      console.log(`   ↳ ${count} asset units added to ${lab.name}`);
-    };
-
-    /* =====================================
-       SEED DATA
-    ===================================== */
-
-    // Global items
-    const arduino = await createItemIfNotExists({
-      name: 'Arduino Uno',
-      sku: 'ARD-UNO',
-      category: 'Microcontroller',
-      tracking_type: 'bulk'
-    });
-
-    const rpi = await createItemIfNotExists({
-      name: 'Raspberry Pi 4',
-      sku: 'RPI-4',
-      category: 'Microprocessor',
-      tracking_type: 'asset'
-    });
-
-    const oscilloscope = await createItemIfNotExists({
-      name: 'Digital Oscilloscope',
-      sku: 'OSC-100',
-      category: 'Measurement',
-      tracking_type: 'asset'
-    });
-
-    /* ===== IoT Lab ===== */
-
-    await addBulkStockToLab({
-      lab: iotLab,
-      item: arduino,
-      quantity: 50,
-      vendor: 'Robu.in'
-    });
-
-    await addAssetStockToLab({
-      lab: iotLab,
-      item: rpi,
-      count: 10,
-      vendor: 'Amazon India'
-    });
-
-    /* ===== ECE Lab ===== */
-
-    await addBulkStockToLab({
-      lab: eceLab,
-      item: arduino,
-      quantity: 30,
-      vendor: 'Thingbits'
-    });
-
-    await addAssetStockToLab({
-      lab: eceLab,
-      item: oscilloscope,
-      count: 5,
-      vendor: 'Tektronix'
-    });
-
-    /* ===== Robotics Lab ===== */
-
-    await addBulkStockToLab({
-      lab: roboticsLab,
-      item: arduino,
-      quantity: 20,
-      vendor: 'Amazon India'
-    });
-
-    console.log('\n🎉 Inventory seeding completed successfully\n');
+    console.log('\n🎉 Inventory Seeding Completed\n');
     process.exit(0);
 
   } catch (err) {
-    console.error('❌ Seeding failed:', err);
+    console.error('❌ Inventory seed failed:', err);
     process.exit(1);
   }
 };
 
-seed();
+seedInventory();

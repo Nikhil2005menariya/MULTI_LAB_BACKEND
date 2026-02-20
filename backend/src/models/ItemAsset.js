@@ -1,10 +1,17 @@
 const mongoose = require('mongoose');
-
 const itemAssetSchema = new mongoose.Schema({
+  lab_id: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Lab',
+    required: true,
+    index: true
+  },
+
   item_id: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Item',
-    required: true
+    required: true,
+    index: true
   },
 
   asset_tag: {
@@ -15,7 +22,6 @@ const itemAssetSchema = new mongoose.Schema({
 
   serial_no: String,
 
-  /* 🔥 NEW — vendor per asset */
   vendor: {
     type: String,
     required: true
@@ -31,7 +37,8 @@ const itemAssetSchema = new mongoose.Schema({
   status: {
     type: String,
     enum: ['available', 'issued', 'damaged', 'retired'],
-    default: 'available'
+    default: 'available',
+    index: true
   },
 
   condition: {
@@ -47,5 +54,7 @@ const itemAssetSchema = new mongoose.Schema({
     ref: 'Transaction'
   }
 }, { timestamps: true });
+
+itemAssetSchema.index({ lab_id: 1, status: 1 });
 
 module.exports = mongoose.model('ItemAsset', itemAssetSchema);

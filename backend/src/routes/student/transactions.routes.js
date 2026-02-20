@@ -7,19 +7,36 @@ const role = require('../../middlewares/role.middleware');
 const {
   raiseTransaction,
   getMyTransactions,
-  getTransactionById
+  getTransactionById,
+  extendReturnDate,
 } = require('../../controllers/student.controller');
 
-// all student routes protected
+/* =====================================================
+   STUDENT TRANSACTION ROUTES
+   Base Path: /api/student/transactions
+===================================================== */
+
+// 🔐 Student-only access
 router.use(auth, role('student'));
 
-// raise transaction
+/* ============================
+   RAISE NEW TRANSACTION
+   POST /api/student/transactions
+============================ */
 router.post('/', raiseTransaction);
 
-// student transaction history
+/* ============================
+   GET MY TRANSACTION HISTORY
+   GET /api/student/transactions/my
+============================ */
 router.get('/my', getMyTransactions);
 
-// track by transaction id
+/* ============================
+   GET TRANSACTION BY ID
+   GET /api/student/transactions/:transaction_id
+============================ */
 router.get('/:transaction_id', getTransactionById);
 
+
+router.patch('/:transaction_id/extend', extendReturnDate);
 module.exports = router;

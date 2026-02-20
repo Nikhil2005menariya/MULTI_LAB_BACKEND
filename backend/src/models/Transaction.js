@@ -1,10 +1,18 @@
 const mongoose = require('mongoose');
 
 /* ============================
-   TRANSACTION ITEM (UNCHANGED)
+   TRANSACTION ITEM (CROSS-LAB SAFE)
 ============================ */
 const transactionItemSchema = new mongoose.Schema(
   {
+    /* 🔥 REQUIRED — LAB BINDING PER ITEM */
+    lab_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Lab',
+      required: true,
+      index: true
+    },
+
     item_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Item',
@@ -16,40 +24,47 @@ const transactionItemSchema = new mongoose.Schema(
     ===================== */
     quantity: {
       type: Number,
-      default: 0
+      default: 0,
+      min: 0
     },
 
     /* =====================
-       ASSET TRACKING
+       ASSET TRACKING (STRICT RELATIONAL)
     ===================== */
-    asset_tags: {
-      type: [String], // ["ARD-UNO-0001"]
-      default: []
-    },
+    asset_ids: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'ItemAsset'
+      }
+    ],
 
     /* =====================
        SYSTEM MANAGED COUNTS
     ===================== */
     issued_quantity: {
       type: Number,
-      default: 0
+      default: 0,
+      min: 0
     },
 
     returned_quantity: {
       type: Number,
-      default: 0
+      default: 0,
+      min: 0
     },
 
     damaged_quantity: {
       type: Number,
-      default: 0
+      default: 0,
+      min: 0
     }
   },
   { _id: false }
 );
 
+
 /* ============================
-   TRANSACTION SCHEMA (FINAL)
+   TRANSACTION SCHEMA (FINAL – CROSS LAB MODEL)
 ============================ */
 const transactionSchema = new mongoose.Schema(
   {
@@ -64,7 +79,7 @@ const transactionSchema = new mongoose.Schema(
     },
 
     /* =====================
-       TRANSACTION TYPE
+       TYPE
     ===================== */
     transaction_type: {
       type: String,
@@ -82,7 +97,15 @@ const transactionSchema = new mongoose.Schema(
       default: null
     },
 
-    target_lab_name: {
+    /* 🔥 USE OBJECTID NOT NAME */
+    target_lab_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Lab',
+      default: null,
+      index: true
+    },
+
+    target_lab_name_snapshot: {
       type: String,
       default: null
     },
@@ -111,11 +134,11 @@ const transactionSchema = new mongoose.Schema(
     },
 
     lab_slot: {
-      type: String // e.g. "CSL-3 | 10:00–12:00"
+      type: String
     },
 
     /* =====================
-       STATUS
+       STATUS (GLOBAL STATE)
     ===================== */
     status: {
       type: String,
@@ -133,7 +156,6 @@ const transactionSchema = new mongoose.Schema(
 
     /* =====================
        STUDENT INFO
-       (NULL for lab session / transfer)
     ===================== */
     student_id: {
       type: mongoose.Schema.Types.ObjectId,
@@ -162,13 +184,12 @@ const transactionSchema = new mongoose.Schema(
     },
 
     /* =====================
-       TRANSACTION ITEMS
+       ITEMS (CROSS-LAB SAFE)
     ===================== */
     items: [transactionItemSchema],
 
     /* =====================
        FACULTY APPROVAL
-       (REGULAR ONLY)
     ===================== */
     faculty_approval: {
       approved: {
@@ -195,9 +216,10 @@ const transactionSchema = new mongoose.Schema(
     expected_return_date: {
       type: Date,
       required: function () {
-        // required for regular + lab_session + temporary lab_transfer
-        return this.transaction_type !== 'lab_transfer' ||
-               this.transfer_type === 'temporary';
+        return (
+          this.transaction_type !== 'lab_transfer' ||
+          this.transfer_type === 'temporary'
+        );
       },
       index: true
     },
@@ -217,7 +239,12 @@ const transactionSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+
+/* ============================
+   INDEXING FOR SCALE
+============================ */
+transactionSchema.index({ student_id: 1, status: 1 });
+transactionSchema.index({ transaction_type: 1, status: 1 });
+transactionSchema.index({ createdAt: -1 });
+
 module.exports = mongoose.model('Transaction', transactionSchema);
-
-
-

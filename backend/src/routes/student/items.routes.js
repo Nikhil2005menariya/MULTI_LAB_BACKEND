@@ -5,12 +5,28 @@ const auth = require('../../middlewares/auth.middleware');
 const role = require('../../middlewares/role.middleware');
 
 const {
-  getAvailableItemsForStudent
+  getAllItems,
+  getItemLabs
 } = require('../../controllers/student.controller');
 
-// student only
+/* =====================================================
+   STUDENT ITEM ROUTES
+   Base Path: /api/student/items
+===================================================== */
+
+// 🔐 Student-only access
 router.use(auth, role('student'));
 
-router.get('/', getAvailableItemsForStudent);
+/* ============================
+   GET ALL AVAILABLE ITEMS
+   GET /api/student/items
+============================ */
+router.get('/', getAllItems);
+
+/* ============================
+   GET LAB-WISE AVAILABILITY FOR ITEM
+   GET /api/student/items/:item_id/labs
+============================ */
+router.get('/:item_id/labs', getItemLabs);
 
 module.exports = router;

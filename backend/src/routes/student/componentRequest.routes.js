@@ -6,13 +6,27 @@ const role = require('../../middlewares/role.middleware');
 
 const {
   requestComponent,
-  getMyComponentRequests,
+  getMyComponentRequests
 } = require('../../controllers/student.controller');
 
-// Student only
+/* =====================================================
+   STUDENT COMPONENT REQUEST ROUTES
+   Base Path: /api/student/component-requests
+===================================================== */
+
+// 🔐 Student-only access
 router.use(auth, role('student'));
 
+/* ============================
+   CREATE COMPONENT REQUEST
+   POST /api/student/component-requests
+============================ */
 router.post('/', requestComponent);
+
+/* ============================
+   GET MY COMPONENT REQUESTS
+   GET /api/student/component-requests
+============================ */
 router.get('/', getMyComponentRequests);
 
 module.exports = router;

@@ -83,4 +83,4 @@ itemSchema.virtual('student_visible_quantity').get(function () {
 itemSchema.set('toJSON', { virtuals: true });
 itemSchema.set('toObject', { virtuals: true });
 
-module.exports = mongoose.model('Item', itemSchema);
+module.exports = mongoose.model('Item', itemSchema);  
