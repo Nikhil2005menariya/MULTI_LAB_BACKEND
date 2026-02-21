@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 const Item = require('../models/Item');
 const ItemAsset = require('../models/ItemAsset');
 const Transaction = require('../models/Transaction');
@@ -1457,7 +1458,10 @@ exports.createTransferRequest = async (req, res) => {
       expected_return_date
     } = req.body;
 
-    if (!sourceLabId || sourceLabId.equals(target_lab_id)) {
+    if (
+      !sourceLabId ||
+      sourceLabId.toString() === target_lab_id.toString()
+    ) {
       return res.status(400).json({ message: 'Invalid target lab' });
     }
 
@@ -1495,13 +1499,35 @@ exports.getIncomingTransfers = async (req, res) => {
     const transfers = await Transaction.find({
       transaction_type: 'lab_transfer',
       target_lab_id: labId,
-      status: { $in: ['raised', 'return_requested'] }
-    }).populate('items.item_id', 'name sku tracking_type');
+      status: { $in: ['raised', 'active', 'return_requested', 'completed'] }
+    })
+      .populate('source_lab_id', 'name code location')
+      .populate('target_lab_id', 'name code location')
+      .populate('items.item_id', 'name sku tracking_type')
+      .populate('items.asset_ids', 'asset_tag') // 🔥 IMPORTANT
+      .sort({ createdAt: -1 })
+      .lean();
 
-    res.json({ success: true, data: transfers });
+    // Attach asset_tags
+    const formatted = transfers.map(t => ({
+      ...t,
+      items: t.items.map(i => ({
+        ...i,
+        asset_tags: i.asset_ids?.map(a => a.asset_tag) || []
+      }))
+    }));
+
+    res.json({
+      success: true,
+      data: formatted
+    });
 
   } catch (err) {
-    res.status(500).json({ success: false });
+    console.error('GET INCOMING TRANSFERS ERROR:', err);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch incoming transfers'
+    });
   }
 };
 
@@ -1512,11 +1538,30 @@ exports.getOutgoingTransfers = async (req, res) => {
     const transfers = await Transaction.find({
       transaction_type: 'lab_transfer',
       source_lab_id: labId
-    }).populate('items.item_id', 'name sku tracking_type');
+    })
+      .populate('target_lab_id', 'name code location')
+      .populate('source_lab_id', 'name code location')
+      .populate('items.item_id', 'name sku tracking_type')
+      .populate('items.asset_ids', 'asset_tag') // 🔥 IMPORTANT
+      .sort({ createdAt: -1 })
+      .lean();
 
-    res.json({ success: true, data: transfers });
+    const formatted = transfers.map(t => ({
+      ...t,
+      items: t.items.map(i => ({
+        ...i,
+        asset_tags: i.asset_ids?.map(a => a.asset_tag) || []
+      }))
+    }));
+
+    res.json({
+      success: true,
+      count: formatted.length,
+      data: formatted
+    });
 
   } catch (err) {
+    console.error('GET OUTGOING TRANSFERS ERROR:', err);
     res.status(500).json({ success: false });
   }
 };
@@ -1526,24 +1571,45 @@ exports.decideTransferRequest = async (req, res) => {
   session.startTransaction();
 
   try {
-    const labId = req.user.lab_id;
+    const labId = new mongoose.Types.ObjectId(req.user.lab_id);
     const { decision, reason } = req.body;
 
     const transaction = await Transaction.findById(req.params.id).session(session);
 
-    if (!transaction || !transaction.target_lab_id.equals(labId)) {
+    if (
+      !transaction ||
+      !transaction.target_lab_id ||
+      transaction.target_lab_id.toString() !== labId.toString()
+    ) {
       throw new Error('Unauthorized');
     }
 
+    /* =========================
+       REJECT FLOW
+    ========================= */
     if (decision === 'rejected') {
       transaction.status = 'rejected';
-      transaction.faculty_approval.rejected_reason = reason || '';
+      transaction.faculty_approval = {
+        ...transaction.faculty_approval,
+        rejected_reason: reason || ''
+      };
+
       await transaction.save({ session });
       await session.commitTransaction();
+
       return res.json({ success: true });
     }
 
-    // APPROVAL LOGIC
+    if (decision !== 'approved') {
+      throw new Error('Invalid decision');
+    }
+
+    /* =========================
+       APPROVAL FLOW
+    ========================= */
+
+    const allocatedTagsMap = {}; // store tags for response only
+
     for (const item of transaction.items) {
 
       const inventory = await LabInventory.findOne({
@@ -1555,9 +1621,13 @@ exports.decideTransferRequest = async (req, res) => {
         throw new Error('Insufficient stock');
       }
 
-      const itemDef = await Item.findById(item.item_id);
+      const itemDef = await Item.findById(item.item_id).session(session);
 
-      // BULK
+      if (!itemDef) {
+        throw new Error('Item not found');
+      }
+
+      /* ================= BULK ================= */
       if (itemDef.tracking_type === 'bulk') {
 
         inventory.available_quantity -= item.quantity;
@@ -1566,8 +1636,16 @@ exports.decideTransferRequest = async (req, res) => {
           inventory.total_quantity -= item.quantity;
 
           await LabInventory.findOneAndUpdate(
-            { lab_id: transaction.source_lab_id, item_id: item.item_id },
-            { $inc: { total_quantity: item.quantity, available_quantity: item.quantity } },
+            {
+              lab_id: transaction.source_lab_id,
+              item_id: item.item_id
+            },
+            {
+              $inc: {
+                total_quantity: item.quantity,
+                available_quantity: item.quantity
+              }
+            },
             { upsert: true, session }
           );
         }
@@ -1575,7 +1653,7 @@ exports.decideTransferRequest = async (req, res) => {
         await inventory.save({ session });
       }
 
-      // ASSET
+      /* ================= ASSET ================= */
       if (itemDef.tracking_type === 'asset') {
 
         const assets = await ItemAsset.find({
@@ -1590,7 +1668,12 @@ exports.decideTransferRequest = async (req, res) => {
           throw new Error('Not enough assets available');
         }
 
+        // Store asset IDs in DB
         item.asset_ids = assets.map(a => a._id);
+
+        // Store tags only for response
+        allocatedTagsMap[item.item_id.toString()] =
+          assets.map(a => a.asset_tag);
 
         for (const asset of assets) {
 
@@ -1605,6 +1688,7 @@ exports.decideTransferRequest = async (req, res) => {
         }
 
         inventory.available_quantity -= item.quantity;
+
         if (transaction.transfer_type === 'permanent') {
           inventory.total_quantity -= item.quantity;
         }
@@ -1617,19 +1701,41 @@ exports.decideTransferRequest = async (req, res) => {
     transaction.issued_at = new Date();
 
     await transaction.save({ session });
-
     await session.commitTransaction();
 
-    res.json({ success: true, data: transaction });
+    /* =========================
+       POPULATE FOR RESPONSE
+    ========================= */
 
+  /* =========================
+    POPULATE FOR RESPONSE
+  ========================= */
+
+  const populated = await Transaction.findById(transaction._id)
+    .populate('items.item_id', 'name sku tracking_type')
+    .populate('items.asset_ids', 'asset_tag')
+    .lean();
+
+  // Attach asset tags from populated asset_ids
+  populated.items = populated.items.map(i => ({
+    ...i,
+    asset_tags: i.asset_ids?.map(a => a.asset_tag) || []
+  }));
+
+  return res.json({
+    success: true,
+    data: populated
+  });
   } catch (err) {
     await session.abortTransaction();
-    res.status(400).json({ success: false, message: err.message });
+    return res.status(400).json({
+      success: false,
+      message: err.message
+    });
   } finally {
     session.endSession();
   }
 };
-
 exports.initiateReturn = async (req, res) => {
   try {
     const labId = req.user.lab_id;
