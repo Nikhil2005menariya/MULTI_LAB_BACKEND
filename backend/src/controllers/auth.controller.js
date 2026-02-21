@@ -6,61 +6,6 @@ const { sendMail } = require('../services/mail.service');
 const Student = require('../models/Student');
 
 /* ======================
-   ADMIN LOGIN
-====================== */
-
-exports.adminLogin = async (req, res) => {
-  const { email, password } = req.body;
-
-  const admin = await Staff.findOne({ email, role: 'admin' }).select('+password');
-
-  if (!admin || !(await bcrypt.compare(password, admin.password))) {
-    return res.status(401).json({ error: 'Invalid credentials' });
-  }
-
-  const token = jwt.sign(
-    { id: admin._id, role: admin.role },
-    process.env.JWT_SECRET,
-    { expiresIn: process.env.JWT_EXPIRES_IN }
-  );
-
-  admin.last_login = new Date();
-  await admin.save();
-
-  res.json({ token });
-};
-
-
-/* ======================
-   STAFF LOGIN (ADMIN + INCHARGE)
-====================== */
-
-exports.staffLogin = async (req, res) => {
-  const { email, password } = req.body;
-
-  const staff = await Staff.findOne({
-    email,
-    role: { $in: ['admin', 'incharge'] }
-  }).select('+password');
-
-  if (!staff || !(await bcrypt.compare(password, staff.password))) {
-    return res.status(401).json({ error: 'Invalid credentials' });
-  }
-
-  const token = jwt.sign(
-    { id: staff._id, role: staff.role },
-    process.env.JWT_SECRET,
-    { expiresIn: process.env.JWT_EXPIRES_IN }
-  );
-
-  staff.last_login = new Date();
-  await staff.save();
-
-  res.json({ token });
-};
-
-
-/* ======================
    STUDENT LOGIN
 ====================== */
 
@@ -237,260 +182,296 @@ exports.studentResetPassword = async (req, res) => {
   }
 };
 
-
-
-/* ============================
-   ADMIN PROFILE – CHANGE PASSWORD
-============================ */
-exports.changeAdminPassword = async (req, res) => {
+/* =====================================================
+   STAFF LOGIN (SUPER_ADMIN / INCHARGE / ASSISTANT)
+===================================================== */
+exports.staffLogin = async (req, res) => {
   try {
-    const { currentPassword, newPassword } = req.body;
+    const { email, password } = req.body;
 
-    if (!currentPassword || !newPassword) {
-      return res.status(400).json({ message: 'Missing required fields' });
+    if (!email || !password) {
+      return res.status(400).json({
+        error: 'Email and password are required'
+      });
     }
 
-    const admin = await Staff.findById(req.user.id).select('+password');
-    if (!admin || admin.role !== 'admin') {
-      return res.status(404).json({ message: 'Admin not found' });
+    const staff = await Staff.findOne({
+      email,
+      is_active: true
+    }).select('+password');
+
+    if (!staff) {
+      return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    const isMatch = await bcrypt.compare(currentPassword, admin.password);
+    const isMatch = await bcrypt.compare(password, staff.password);
+
     if (!isMatch) {
-      return res.status(400).json({ message: 'Current password is incorrect' });
+      return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    admin.password = await bcrypt.hash(newPassword, 10);
-    await admin.save();
+    const token = jwt.sign(
+      {
+        id: staff._id,
+        role: staff.role,
+        lab_id: staff.lab_id || null
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRES_IN || '1d' }
+    );
 
-    res.json({ success: true });
+    staff.last_login = new Date();
+    await staff.save();
+
+    return res.json({
+      success: true,
+      token,
+      user: {
+        id: staff._id,
+        name: staff.name,
+        email: staff.email,
+        role: staff.role,
+        lab_id: staff.lab_id
+      }
+    });
+
   } catch (err) {
-    console.error('Change admin password error:', err);
-    res.status(500).json({ message: 'Failed to change password' });
+    console.error('Staff login error:', err);
+    return res.status(500).json({ error: 'Login failed' });
   }
 };
 
-/* ============================
-   ADMIN PROFILE – REQUEST EMAIL OTP
-============================ */
-exports.requestAdminEmailOTP = async (req, res) => {
+
+/* =====================================================
+   FORGOT PASSWORD – SEND OTP
+===================================================== */
+exports.forgotPassword = async (req, res) => {
   try {
-    const { newEmail } = req.body;
+    const { email } = req.body;
 
-    if (!newEmail) {
-      return res.status(400).json({ message: 'New email is required' });
-    }
+    const staff = await Staff.findOne({ email });
 
-    const admin = await Staff.findById(req.user.id).select(
-      '+email_otp +email_otp_expiry +pending_email'
-    );
-
-    if (!admin || admin.role !== 'admin') {
-      return res.status(404).json({ message: 'Admin not found' });
-    }
-
-    const emailExists = await Staff.findOne({ email: newEmail });
-    if (emailExists) {
-      return res.status(400).json({ message: 'Email already in use' });
+    if (!staff) {
+      return res.status(404).json({
+        error: 'Account not found'
+      });
     }
 
     const otp = crypto.randomInt(100000, 999999).toString();
 
-    admin.pending_email = newEmail;
-    admin.email_otp = otp;
-    admin.email_otp_expiry = Date.now() + 10 * 60 * 1000; // 10 mins
-    await admin.save();
+    staff.reset_otp = otp;
+    staff.reset_otp_expiry = Date.now() + 10 * 60 * 1000; // 10 mins
+    await staff.save();
 
     await sendMail({
-      to: newEmail,
-      subject: 'Admin Email Change Verification',
+      to: email,
+      subject: 'Password Reset OTP',
       html: `
-        <p>Your OTP to change admin email is:</p>
+        <p>Your password reset OTP is:</p>
         <h2>${otp}</h2>
         <p>This OTP expires in 10 minutes.</p>
       `
     });
 
-    res.json({ success: true });
+    return res.json({
+      success: true,
+      message: 'OTP sent to registered email'
+    });
+
   } catch (err) {
-    console.error('Request admin email OTP error:', err);
-    res.status(500).json({ message: 'Failed to send OTP' });
-  }
-};
-
-/* ============================
-   ADMIN PROFILE – UPDATE EMAIL
-============================ */
-exports.updateAdminEmail = async (req, res) => {
-  try {
-    const { newEmail, otp } = req.body;
-
-    if (!newEmail || !otp) {
-      return res.status(400).json({ message: 'Missing required fields' });
-    }
-
-    const admin = await Staff.findById(req.user.id).select(
-      '+email_otp +email_otp_expiry +pending_email'
-    );
-
-    if (!admin || admin.role !== 'admin') {
-      return res.status(404).json({ message: 'Admin not found' });
-    }
-
-    if (
-      admin.pending_email !== newEmail ||
-      admin.email_otp !== otp ||
-      Date.now() > admin.email_otp_expiry
-    ) {
-      return res.status(400).json({ message: 'Invalid or expired OTP' });
-    }
-
-    admin.email = newEmail;
-    admin.pending_email = null;
-    admin.email_otp = null;
-    admin.email_otp_expiry = null;
-
-    await admin.save();
-
-    res.json({ success: true });
-  } catch (err) {
-    console.error('Update admin email error:', err);
-    res.status(500).json({ message: 'Failed to update email' });
+    console.error('Forgot password error:', err);
+    return res.status(500).json({ error: 'Failed to send OTP' });
   }
 };
 
 
-
-exports.changeInchargePassword = async (req, res) => {
+/* =====================================================
+   RESET PASSWORD USING OTP
+===================================================== */
+exports.resetPassword = async (req, res) => {
   try {
-    const { current_password, new_password } = req.body;
+    const { email, otp, newPassword } = req.body;
 
-    if (!current_password || !new_password) {
-      return res.status(400).json({ message: 'Missing fields' });
-    }
-
-    // ✅ MUST SELECT password
-    const incharge = await Staff.findById(req.user.id).select('+password');
-
-    if (!incharge || incharge.role !== 'incharge') {
-      return res.status(404).json({ message: 'Incharge not found' });
-    }
-
-    const isMatch = await bcrypt.compare(
-      current_password,
-      incharge.password
-    );
-
-    if (!isMatch) {
+    if (!email || !otp || !newPassword) {
       return res.status(400).json({
-        message: 'Current password is incorrect',
+        error: 'Missing required fields'
       });
     }
 
-    incharge.password = await bcrypt.hash(new_password, 10);
-    await incharge.save();
+    const staff = await Staff.findOne({ email }).select(
+      '+reset_otp +reset_otp_expiry'
+    );
 
-    res.json({
+    if (!staff) {
+      return res.status(404).json({ error: 'Account not found' });
+    }
+
+    if (
+      staff.reset_otp !== otp ||
+      Date.now() > staff.reset_otp_expiry
+    ) {
+      return res.status(400).json({
+        error: 'Invalid or expired OTP'
+      });
+    }
+
+    staff.password = await bcrypt.hash(newPassword, 10);
+    staff.reset_otp = undefined;
+    staff.reset_otp_expiry = undefined;
+
+    await staff.save();
+
+    return res.json({
       success: true,
-      message: 'Password updated successfully',
+      message: 'Password reset successful'
     });
+
   } catch (err) {
-    console.error('Incharge change password error:', err);
-    res.status(500).json({ message: 'Failed to change password' });
+    console.error('Reset password error:', err);
+    return res.status(500).json({ error: 'Failed to reset password' });
   }
 };
 
 
-
-exports.requestInchargeEmailOTP = async (req, res) => {
+/* =====================================================
+   CHANGE PASSWORD (LOGGED IN)
+===================================================== */
+exports.changePassword = async (req, res) => {
   try {
-    const { email } = req.body;
+    const { currentPassword, newPassword } = req.body;
 
-    if (!email) {
-      return res.status(400).json({ message: 'Email is required' });
+    const staff = await Staff.findById(req.user.id).select('+password');
+
+    if (!staff) {
+      return res.status(404).json({ error: 'User not found' });
     }
 
-    const incharge = await Staff.findById(req.user.id).select(
+    const isMatch = await bcrypt.compare(currentPassword, staff.password);
+
+    if (!isMatch) {
+      return res.status(400).json({
+        error: 'Current password is incorrect'
+      });
+    }
+
+    staff.password = await bcrypt.hash(newPassword, 10);
+    await staff.save();
+
+    return res.json({
+      success: true,
+      message: 'Password updated successfully'
+    });
+
+  } catch (err) {
+    console.error('Change password error:', err);
+    return res.status(500).json({ error: 'Failed to change password' });
+  }
+};
+
+
+/* =====================================================
+   REQUEST EMAIL CHANGE – SEND OTP
+===================================================== */
+exports.requestEmailChangeOTP = async (req, res) => {
+  try {
+    const { newEmail } = req.body;
+
+    if (!newEmail) {
+      return res.status(400).json({
+        error: 'New email is required'
+      });
+    }
+
+    const existing = await Staff.findOne({ email: newEmail });
+    if (existing) {
+      return res.status(400).json({
+        error: 'Email already in use'
+      });
+    }
+
+    const staff = await Staff.findById(req.user.id).select(
       '+email_otp +email_otp_expiry +pending_email'
     );
 
-    if (!incharge || incharge.role !== 'incharge') {
-      return res.status(404).json({ message: 'Incharge not found' });
-    }
-
-    const emailExists = await Staff.findOne({ email });
-    if (emailExists) {
-      return res.status(400).json({ message: 'Email already in use' });
+    if (!staff) {
+      return res.status(404).json({ error: 'User not found' });
     }
 
     const otp = crypto.randomInt(100000, 999999).toString();
 
-    incharge.pending_email = email;
-    incharge.email_otp = otp;
-    incharge.email_otp_expiry = Date.now() + 10 * 60 * 1000;
-
-    await incharge.save();
+    staff.pending_email = newEmail;
+    staff.email_otp = otp;
+    staff.email_otp_expiry = Date.now() + 10 * 60 * 1000; // 10 mins
+    await staff.save();
 
     await sendMail({
-      to: email,
-      subject: 'Email Change Verification',
+      to: newEmail,
+      subject: 'Email Change Verification OTP',
       html: `
-        <p>Your OTP is:</p>
+        <p>Your OTP to change email is:</p>
         <h2>${otp}</h2>
-        <p>Valid for 10 minutes.</p>
-      `,
+        <p>This OTP expires in 10 minutes.</p>
+      `
     });
 
-    res.json({
+    return res.json({
       success: true,
-      message: 'OTP sent successfully',
+      message: 'OTP sent to new email'
     });
+
   } catch (err) {
-    console.error('Incharge request OTP error:', err);
-    res.status(500).json({ message: 'Failed to send OTP' });
+    console.error('Request email change error:', err);
+    return res.status(500).json({ error: 'Failed to send OTP' });
   }
 };
 
 
-
-exports.updateInchargeEmail = async (req, res) => {
+/* =====================================================
+   CONFIRM EMAIL CHANGE
+===================================================== */
+exports.confirmEmailChange = async (req, res) => {
   try {
-    const { email, otp } = req.body;
+    const { newEmail, otp } = req.body;
 
-    if (!email || !otp) {
-      return res.status(400).json({ message: 'Missing fields' });
-    }
-
-    const incharge = await Staff.findById(req.user.id).select(
+    const staff = await Staff.findById(req.user.id).select(
       '+email_otp +email_otp_expiry +pending_email'
     );
 
-    if (!incharge || incharge.role !== 'incharge') {
-      return res.status(404).json({ message: 'Incharge not found' });
+    if (!staff) {
+      return res.status(404).json({ error: 'User not found' });
     }
 
     if (
-      incharge.pending_email !== email ||
-      incharge.email_otp !== otp ||
-      Date.now() > incharge.email_otp_expiry
+      staff.pending_email !== newEmail ||
+      staff.email_otp !== otp ||
+      Date.now() > staff.email_otp_expiry
     ) {
-      return res.status(400).json({ message: 'Invalid or expired OTP' });
+      return res.status(400).json({
+        error: 'Invalid or expired OTP'
+      });
     }
 
-    incharge.email = email;
-    incharge.pending_email = null;
-    incharge.email_otp = null;
-    incharge.email_otp_expiry = null;
+    staff.email = newEmail;
+    staff.pending_email = undefined;
+    staff.email_otp = undefined;
+    staff.email_otp_expiry = undefined;
 
-    await incharge.save();
+    await staff.save();
 
-    res.json({
+    return res.json({
       success: true,
-      message: 'Email updated successfully',
+      message: 'Email updated successfully'
     });
+
   } catch (err) {
-    console.error('Incharge update email error:', err);
-    res.status(500).json({ message: 'Failed to update email' });
+    console.error('Confirm email change error:', err);
+    return res.status(500).json({ error: 'Failed to update email' });
   }
 };
+
+
+
+
+
+
 

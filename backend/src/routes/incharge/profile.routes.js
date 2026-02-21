@@ -3,17 +3,28 @@ const router = express.Router();
 
 const auth = require('../../middlewares/auth.middleware');
 const role = require('../../middlewares/role.middleware');
+
 const {
-  changeInchargePassword,
-  requestInchargeEmailOTP,
-  updateInchargeEmail,
+  changePassword,
+  requestEmailChangeOTP,
+  confirmEmailChange
 } = require('../../controllers/auth.controller');
 
-// 🔒 incharge only
-router.use(auth, role('incharge'));
+/* =====================================================
+   LAB ASSISTANT PROFILE ROUTES
+   (Role: assistant)
+===================================================== */
 
-router.post('/password', changeInchargePassword);
-router.post('/request-otp', requestInchargeEmailOTP);
-router.post('/email', updateInchargeEmail);
+// 🔒 Assistant only
+router.use(auth, role('assistant'));
+
+// Change password
+router.post('/change-password', changePassword);
+
+// Request email change OTP
+router.post('/request-email-change', requestEmailChangeOTP);
+
+// Confirm email change
+router.post('/confirm-email-change', confirmEmailChange);
 
 module.exports = router;

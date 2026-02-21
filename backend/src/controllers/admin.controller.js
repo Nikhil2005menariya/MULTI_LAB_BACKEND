@@ -21,21 +21,26 @@ const s3 = require('../utils/s3');
 ============================ */
 exports.addItem = async (req, res) => {
   try {
+    const labId = req.user.lab_id;
+
     const {
       name,
       sku,
       category,
-      vendor,
-      location,
       description,
       tracking_type,
       initial_quantity,
-      min_threshold_quantity,
+      vendor,
+      invoice_number,
       asset_prefix
     } = req.body;
 
-    if (!tracking_type || !['bulk', 'asset'].includes(tracking_type)) {
-      return res.status(400).json({ error: 'Invalid tracking type' });
+    if (!labId) {
+      return res.status(403).json({ error: 'Lab access denied' });
+    }
+
+    if (!vendor) {
+      return res.status(400).json({ error: 'Vendor is required' });
     }
 
     if (!initial_quantity || initial_quantity <= 0) {
@@ -44,58 +49,61 @@ exports.addItem = async (req, res) => {
       });
     }
 
-    /* ================= CREATE ITEM ================= */
-    const item = await Item.create({
-      name,
-      sku,
-      category,
-      vendor,
-      location,
-      description,
-      tracking_type,
+    /* ================= CREATE ITEM (GLOBAL DEF ONLY) ================= */
+    let item = await Item.findOne({ sku });
 
-      // ✅ LIVE FIELDS
+    if (!item) {
+          item = await Item.create({
+            name,
+            sku,
+            category,
+            description,
+            tracking_type,
+            is_student_visible:
+              typeof req.body.is_student_visible === 'boolean'
+                ? req.body.is_student_visible
+                : true,
+            total_quantity: 0,
+            available_quantity: 0
+          });
+    }
+
+    /* ================= CREATE LAB INVENTORY ================= */
+    const inventory = await require('../models/LabInventory').create({
+      lab_id: labId,
+      item_id: item._id,
       total_quantity: initial_quantity,
-      available_quantity: initial_quantity,
-
-      // 📜 HISTORICAL
-      initial_quantity,
-
-      min_threshold_quantity,
-
-      // 🔐 ASSET COUNTER
-      last_asset_seq: tracking_type === 'asset' ? initial_quantity : 0
+      available_quantity: initial_quantity
     });
 
-    const generatedAssetTags = [];
+    /* ================= CREATE ASSETS (IF ASSET) ================= */
+    const createdAssets = [];
 
-    /* ================= CREATE ASSETS ================= */
     if (tracking_type === 'asset') {
       const prefix = asset_prefix || sku;
 
-      const assets = [];
-
       for (let i = 1; i <= initial_quantity; i++) {
         const assetTag = `${prefix}-${String(i).padStart(4, '0')}`;
-        generatedAssetTags.push(assetTag);
 
-        assets.push({
+        const asset = await ItemAsset.create({
+          lab_id: labId,
           item_id: item._id,
           asset_tag: assetTag,
-          location,
+          vendor, // 🔥 NEW vendor
+          invoice_number,
           status: 'available',
           condition: 'good'
         });
-      }
 
-      await ItemAsset.insertMany(assets);
+        createdAssets.push(asset.asset_tag);
+      }
     }
 
     return res.status(201).json({
       success: true,
       message: 'Item added successfully',
-      data: item,
-      generated_asset_tags: generatedAssetTags
+      data: inventory,
+      created_assets: createdAssets
     });
 
   } catch (err) {
@@ -103,23 +111,26 @@ exports.addItem = async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 };
-/* ============================
-   UPDATE ITEM (FINAL – BACKWARD COMPATIBLE)
-============================ */
 exports.updateItem = async (req, res) => {
   try {
+    const labId = req.user.lab_id;
+
+    if (!labId) {
+      return res.status(403).json({ error: 'Lab access denied' });
+    }
+
     const item = await Item.findById(req.params.id);
     if (!item) {
       return res.status(404).json({ error: 'Item not found' });
     }
 
-    /* ===== tracking_type is immutable ===== */
+    // 🔒 Tracking type immutable
     if (
       req.body.tracking_type &&
       req.body.tracking_type !== item.tracking_type
     ) {
       return res.status(400).json({
-        error: 'Tracking type cannot be changed after item creation',
+        error: 'Tracking type cannot be changed after item creation'
       });
     }
 
@@ -127,14 +138,33 @@ exports.updateItem = async (req, res) => {
     const removeAssetTags = req.body.remove_asset_tags || [];
     const createdAssets = [];
 
-    /* =================================================
-       ENSURE last_asset_seq EXISTS (AUTO-INIT)
-       ================================================= */
+    /* ===============================
+       FETCH LAB INVENTORY (STRICT)
+    =============================== */
+    const LabInventory = require('../models/LabInventory');
+
+    const inventory = await LabInventory.findOne({
+      lab_id: labId,
+      item_id: item._id
+    });
+
+    if (!inventory) {
+      return res.status(404).json({
+        error: 'Item not found in this lab'
+      });
+    }
+
+    /* ===============================
+       ENSURE last_asset_seq EXISTS
+    =============================== */
     if (
       item.tracking_type === 'asset' &&
       typeof item.last_asset_seq !== 'number'
     ) {
-      const lastAsset = await ItemAsset.findOne({ item_id: item._id })
+      const lastAsset = await ItemAsset.findOne({
+        item_id: item._id,
+        lab_id: labId
+      })
         .sort({ asset_tag: -1 })
         .lean();
 
@@ -146,56 +176,79 @@ exports.updateItem = async (req, res) => {
       }
     }
 
-    /* ================= ADD STOCK ================= */
+    /* ===============================
+       ADD STOCK
+    =============================== */
     if (addQty > 0) {
 
-      /* ===== BULK ===== */
+      if (!req.body.vendor) {
+        return res.status(400).json({
+          error: 'Vendor is required when adding new stock'
+        });
+      }
+
+      // BULK
       if (item.tracking_type === 'bulk') {
+
+        inventory.total_quantity += addQty;
+        inventory.available_quantity += addQty;
+
         item.total_quantity += addQty;
         item.available_quantity += addQty;
       }
 
-      /* ===== ASSET ===== */
+      // ASSET
       if (item.tracking_type === 'asset') {
+
         for (let i = 0; i < addQty; i++) {
-          item.last_asset_seq += 1;
+
+          item.last_asset_seq = (item.last_asset_seq || 0) + 1;
 
           const assetTag = `${item.sku}-${String(
             item.last_asset_seq
           ).padStart(4, '0')}`;
 
           const asset = await ItemAsset.create({
+            lab_id: labId,
             item_id: item._id,
             asset_tag: assetTag,
+            vendor: req.body.vendor,           // 🔥 new vendor only for new stock
+            invoice_number: req.body.invoice_number,
             status: 'available',
-            condition: 'good',
-            location: item.location,
+            condition: 'good'
           });
 
-          // ✅ RETURN FULL OBJECT (OLD BEHAVIOR)
-          createdAssets.push(asset);
+          createdAssets.push(asset); // backward compatible
         }
+
+        inventory.total_quantity += addQty;
+        inventory.available_quantity += addQty;
 
         item.total_quantity += addQty;
         item.available_quantity += addQty;
       }
+
+      await inventory.save();
     }
 
-    /* ================= REMOVE ASSET STOCK ================= */
+    /* ===============================
+       REMOVE ASSET STOCK
+    =============================== */
     if (
       addQty < 0 &&
       item.tracking_type === 'asset' &&
       removeAssetTags.length > 0
     ) {
       const assets = await ItemAsset.find({
+        lab_id: labId,
         item_id: item._id,
         asset_tag: { $in: removeAssetTags },
-        status: 'available',
+        status: 'available'
       });
 
       if (assets.length !== removeAssetTags.length) {
         return res.status(400).json({
-          error: 'One or more selected assets are not available',
+          error: 'One or more selected assets are not available'
         });
       }
 
@@ -204,60 +257,92 @@ exports.updateItem = async (req, res) => {
         { $set: { status: 'retired', condition: 'broken' } }
       );
 
+      inventory.total_quantity -= assets.length;
+      inventory.available_quantity -= assets.length;
+
       item.total_quantity -= assets.length;
       item.available_quantity -= assets.length;
+
+      await inventory.save();
     }
 
-    /* ================= REMOVE BULK STOCK ================= */
+    /* ===============================
+       REMOVE BULK STOCK
+    =============================== */
     if (addQty < 0 && item.tracking_type === 'bulk') {
       const removeQty = Math.abs(addQty);
 
-      if (removeQty > item.available_quantity) {
+      if (removeQty > inventory.available_quantity) {
         return res.status(400).json({
-          error: 'Cannot remove more than available quantity',
+          error: 'Cannot remove more than available quantity'
         });
       }
 
+      inventory.total_quantity -= removeQty;
+      inventory.available_quantity -= removeQty;
+
       item.total_quantity -= removeQty;
       item.available_quantity -= removeQty;
+
+      await inventory.save();
     }
 
-    /* ================= CLEAN REQUEST ================= */
-    delete req.body.add_quantity;
-    delete req.body.remove_asset_tags;
-    delete req.body.tracking_type;
-    delete req.body.initial_quantity;
-    delete req.body.available_quantity;
-    delete req.body.total_quantity;
-    delete req.body.last_asset_seq;
+    /* ===============================
+       SAFE FIELD UPDATES (WHITELIST)
+    =============================== */
 
-    Object.assign(item, req.body);
+    if (req.body.name !== undefined)
+      item.name = req.body.name;
+
+    if (req.body.category !== undefined)
+      item.category = req.body.category;
+
+    if (req.body.description !== undefined)
+      item.description = req.body.description;
+
+    if (typeof req.body.is_student_visible === 'boolean')
+      item.is_student_visible = req.body.is_student_visible;
+
+    /* ===============================
+       SAVE ITEM
+    =============================== */
     await item.save();
 
     return res.json({
       success: true,
       data: item,
-      created_assets: createdAssets, // 🔥 EXACTLY LIKE BEFORE
+      created_assets: createdAssets
     });
 
   } catch (err) {
     console.error('UPDATE ITEM ERROR:', err);
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({
+      error: err.message
+    });
   }
 };
 
-
 /* ============================
-   GET ITEM ASSETS
+   GET ITEM ASSETS (LAB SAFE)
 ============================ */
 exports.getItemAssets = async (req, res) => {
   try {
+    const labId = req.user.lab_id;
+
+    if (!labId) {
+      return res.status(403).json({
+        error: 'Lab access denied'
+      });
+    }
+
     const { id } = req.params;
     const { status } = req.query;
 
     const item = await Item.findById(id);
     if (!item) {
-      return res.status(404).json({ error: 'Item not found' });
+      return res.status(404).json({
+        error: 'Item not found'
+      });
     }
 
     if (item.tracking_type !== 'asset') {
@@ -266,16 +351,24 @@ exports.getItemAssets = async (req, res) => {
       });
     }
 
-    const filter = { item_id: item._id };
-    if (status) filter.status = status;
+    /* 🔒 LAB ISOLATION */
+    const filter = {
+      lab_id: labId,
+      item_id: item._id
+    };
+
+    if (status) {
+      filter.status = status;
+    }
 
     const assets = await ItemAsset.find(filter)
-      .select('asset_tag status condition')
+      .select('asset_tag serial_no vendor invoice_number status condition createdAt')
       .sort({ asset_tag: 1 })
       .lean();
 
     return res.json({
       success: true,
+      count: assets.length,
       data: assets
     });
 
@@ -286,230 +379,581 @@ exports.getItemAssets = async (req, res) => {
     });
   }
 };
-
 /* ============================
-   SOFT DELETE ITEM
+   REMOVE ITEM FROM LAB (SAFE)
 ============================ */
 exports.removeItem = async (req, res) => {
   try {
-    const item = await Item.findByIdAndUpdate(
-      req.params.id,
-      { is_active: false },
-      { new: true }
-    );
+    const labId = req.user.lab_id;
 
-    if (!item) {
-      return res.status(404).json({ error: 'Item not found' });
+    if (!labId) {
+      return res.status(403).json({
+        error: 'Lab access denied'
+      });
     }
 
-    res.json({
-      success: true,
-      message: 'Item removed (soft delete)'
+    const item = await Item.findById(req.params.id);
+    if (!item) {
+      return res.status(404).json({
+        error: 'Item not found'
+      });
+    }
+
+    /* ===============================
+       CHECK LAB INVENTORY
+    =============================== */
+    const inventory = await require('../models/LabInventory').findOne({
+      lab_id: labId,
+      item_id: item._id
     });
+
+    if (!inventory) {
+      return res.status(404).json({
+        error: 'Item not found in this lab'
+      });
+    }
+
+    /* ===============================
+       BLOCK IF ACTIVE TRANSACTIONS
+    =============================== */
+    const activeTxn = await Transaction.findOne({
+      'items.item_id': item._id,
+      'items.lab_id': labId,
+      status: { $in: ['approved', 'active', 'overdue'] }
+    });
+
+    if (activeTxn) {
+      return res.status(400).json({
+        error: 'Cannot remove item with active transactions'
+      });
+    }
+
+    /* ===============================
+       BLOCK IF ISSUED ASSETS EXIST
+    =============================== */
+    if (item.tracking_type === 'asset') {
+      const issuedAsset = await ItemAsset.findOne({
+        lab_id: labId,
+        item_id: item._id,
+        status: 'issued'
+      });
+
+      if (issuedAsset) {
+        return res.status(400).json({
+          error: 'Cannot remove item with issued assets'
+        });
+      }
+    }
+
+    /* ===============================
+       SOFT DELETE LAB INVENTORY
+    =============================== */
+    await require('../models/LabInventory').deleteOne({
+      _id: inventory._id
+    });
+
+    /* ===============================
+       RETIRE ALL LAB ASSETS
+    =============================== */
+    await ItemAsset.updateMany(
+      {
+        lab_id: labId,
+        item_id: item._id
+      },
+      {
+        $set: { status: 'retired', condition: 'broken' }
+      }
+    );
+
+    /* ===============================
+       OPTIONAL: DEACTIVATE GLOBAL ITEM
+       ONLY IF NO LABS LEFT
+    =============================== */
+    const remainingLabs = await require('../models/LabInventory').countDocuments({
+      item_id: item._id
+    });
+
+    if (remainingLabs === 0) {
+      item.is_active = false;
+      await item.save();
+    }
+
+    return res.json({
+      success: true,
+      message: 'Item removed from this lab successfully'
+    });
+
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    console.error('REMOVE ITEM ERROR:', err);
+    return res.status(500).json({
+      error: err.message
+    });
   }
 };
 
 /* ============================
-   VIEW ALL ITEMS
+   VIEW ALL ITEMS (LAB SAFE)
 ============================ */
 exports.getAllItems = async (req, res) => {
   try {
-    const items = await Item.find({ is_active: true }).sort({ name: 1 });
-    res.json({ success: true, data: items });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-};
+    const labId = req.user.lab_id;
 
-/* ============================
-   TRANSACTION HISTORY
-============================ */
-exports.getTransactionHistory = async (req, res) => {
-  try {
-    const transactions = await Transaction.find()
-      .populate('student_id', 'name reg_no email')
-      .populate('items.item_id', 'name sku tracking_type')
+    if (!labId) {
+      return res.status(403).json({
+        error: 'Lab access denied'
+      });
+    }
+
+    const LabInventory = require('../models/LabInventory');
+
+    const inventories = await LabInventory.find({
+      lab_id: labId
+    })
+      .populate({
+        path: 'item_id',
+        match: { is_active: true },
+        select: 'name sku category description tracking_type is_student_visible'
+      })
       .sort({ createdAt: -1 })
       .lean();
 
-    res.json({ success: true, data: transactions });
+    // Remove null items (if globally deactivated)
+    const data = inventories
+      .filter(inv => inv.item_id)
+      .map(inv => ({
+        item_id: inv.item_id._id,
+        name: inv.item_id.name,
+        sku: inv.item_id.sku,
+        category: inv.item_id.category,
+        description: inv.item_id.description,
+        tracking_type: inv.item_id.tracking_type,
+        is_student_visible: inv.item_id.is_student_visible,
+
+        total_quantity: inv.total_quantity,
+        available_quantity: inv.available_quantity,
+        reserved_quantity: inv.reserved_quantity,
+        damaged_quantity: inv.damaged_quantity
+      }));
+
+    return res.json({
+      success: true,
+      count: data.length,
+      data
+    });
+
   } catch (err) {
-    console.error('GET TRANSACTION HISTORY ERROR:', err);
-    res.status(500).json({ error: err.message });
+    console.error('GET ALL ITEMS ERROR:', err);
+    return res.status(500).json({
+      error: 'Failed to fetch items'
+    });
   }
 };
 
 /* ============================
-   SEARCH TRANSACTIONS
+   TRANSACTION HISTORY (LAB SAFE)
+============================ */
+exports.getTransactionHistory = async (req, res) => {
+  try {
+    const labId = req.user.lab_id;
+
+    if (!labId) {
+      return res.status(403).json({
+        error: 'Lab access denied'
+      });
+    }
+
+    const transactions = await Transaction.find({
+      'items.lab_id': labId
+    })
+      .populate('student_id', 'name reg_no email')
+      .populate('items.item_id', 'name sku tracking_type')
+      .populate('issued_by_incharge_id', 'name email')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    return res.json({
+      success: true,
+      count: transactions.length,
+      data: transactions
+    });
+
+  } catch (err) {
+    console.error('GET TRANSACTION HISTORY ERROR:', err);
+    return res.status(500).json({
+      error: 'Failed to fetch transaction history'
+    });
+  }
+};
+
+/* ============================
+   SEARCH TRANSACTIONS (LAB SAFE)
 ============================ */
 exports.searchTransactions = async (req, res) => {
   try {
-    const { transaction_id, reg_no, faculty_email, faculty_id } = req.query;
+    const labId = req.user.lab_id;
 
-    const filter = {};
-    if (transaction_id) filter.transaction_id = transaction_id;
-    if (reg_no) filter.student_reg_no = reg_no;
-    if (faculty_email) filter.faculty_email = faculty_email;
-    if (faculty_id) filter.faculty_id = faculty_id;
+    if (!labId) {
+      return res.status(403).json({
+        error: 'Lab access denied'
+      });
+    }
+
+    const {
+      transaction_id,
+      reg_no,
+      faculty_email,
+      faculty_id,
+      status
+    } = req.query;
+
+    /* ===============================
+       BASE FILTER (LAB ISOLATION)
+    =============================== */
+    const filter = {
+      'items.lab_id': labId
+    };
+
+    /* ===============================
+       OPTIONAL SEARCH FILTERS
+    =============================== */
+    if (transaction_id) {
+      filter.transaction_id = transaction_id;
+    }
+
+    if (reg_no) {
+      filter.student_reg_no = reg_no;
+    }
+
+    if (faculty_email) {
+      filter.faculty_email = faculty_email;
+    }
+
+    if (faculty_id) {
+      filter.faculty_id = faculty_id;
+    }
+
+    if (status) {
+      filter.status = status;
+    }
 
     const transactions = await Transaction.find(filter)
       .populate('student_id', 'name reg_no email')
       .populate('items.item_id', 'name sku tracking_type')
+      .populate('issued_by_incharge_id', 'name email')
       .sort({ createdAt: -1 })
       .lean();
 
-    res.json({ success: true, data: transactions });
+    return res.json({
+      success: true,
+      count: transactions.length,
+      data: transactions
+    });
+
   } catch (err) {
     console.error('SEARCH TRANSACTIONS ERROR:', err);
-    res.status(500).json({ error: err.message });
+    return res.status(500).json({
+      error: 'Failed to search transactions'
+    });
   }
 };
 
 /* ============================
-   OVERDUE TRANSACTIONS
+   OVERDUE TRANSACTIONS (LAB SAFE)
 ============================ */
 exports.getOverdueTransactions = async (req, res) => {
   try {
-    const overdue = await Transaction.find({ status: 'overdue' })
+    const labId = req.user.lab_id;
+
+    if (!labId) {
+      return res.status(403).json({
+        error: 'Lab access denied'
+      });
+    }
+
+    const overdue = await Transaction.find({
+      status: 'overdue',
+      'items.lab_id': labId
+    })
       .populate('student_id', 'name reg_no email')
       .populate('items.item_id', 'name sku tracking_type')
+      .populate('issued_by_incharge_id', 'name email')
       .sort({ expected_return_date: 1 })
       .lean();
 
-    res.json({ success: true, data: overdue });
+    return res.json({
+      success: true,
+      count: overdue.length,
+      data: overdue
+    });
+
   } catch (err) {
     console.error('GET OVERDUE TRANSACTIONS ERROR:', err);
-    res.status(500).json({ error: err.message });
+    return res.status(500).json({
+      error: 'Failed to fetch overdue transactions'
+    });
   }
 };
 
 /* ============================
-   GET SINGLE ITEM
+   GET SINGLE ITEM (LAB SAFE)
 ============================ */
 exports.getItemById = async (req, res) => {
   try {
+    const labId = req.user.lab_id;
+
+    if (!labId) {
+      return res.status(403).json({
+        error: 'Lab access denied'
+      });
+    }
+
     const item = await Item.findOne({
       _id: req.params.id,
       is_active: true
-    });
+    }).lean();
 
     if (!item) {
-      return res.status(404).json({ error: 'Item not found' });
+      return res.status(404).json({
+        error: 'Item not found'
+      });
     }
 
-    res.json({ success: true, data: item });
+    const LabInventory = require('../models/LabInventory');
+
+    const inventory = await LabInventory.findOne({
+      lab_id: labId,
+      item_id: item._id
+    }).lean();
+
+    if (!inventory) {
+      return res.status(404).json({
+        error: 'Item not found in this lab'
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        _id: item._id,
+        name: item.name,
+        sku: item.sku,
+        category: item.category,
+        description: item.description,
+        tracking_type: item.tracking_type,
+        is_student_visible: item.is_student_visible,
+
+        total_quantity: inventory.total_quantity,
+        available_quantity: inventory.available_quantity,
+        reserved_quantity: inventory.reserved_quantity,
+        damaged_quantity: inventory.damaged_quantity
+      }
+    });
+
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    console.error('GET ITEM BY ID ERROR:', err);
+    return res.status(500).json({
+      error: 'Failed to fetch item'
+    });
   }
 };
 
 
-
 /* ======================================
-   ADMIN — GET ALL LAB SESSIONS
+   LAB INCHARGE — GET ALL LAB SESSIONS (LAB SAFE)
 ====================================== */
 exports.getLabSessions = async (req, res) => {
   try {
+    const labId = req.user.lab_id;
+
+    if (!labId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Lab access denied'
+      });
+    }
+
     const records = await Transaction.find({
-      student_reg_no: 'LAB-SESSION'
+      transaction_type: 'lab_session',
+      'items.lab_id': labId
     })
+      .populate('student_id', 'name reg_no email')
       .populate('issued_by_incharge_id', 'name email')
       .populate('items.item_id', 'name sku tracking_type')
       .sort({ createdAt: -1 })
       .lean();
 
-    res.json({
+    return res.json({
       success: true,
       count: records.length,
       data: records
     });
+
   } catch (err) {
-    console.error('Admin get lab sessions error:', err);
-    res.status(500).json({ success: false, message: 'Failed to fetch lab sessions' });
+    console.error('Get lab sessions error:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch lab sessions'
+    });
   }
 };
 
 /* ======================================
-   ADMIN — GET SINGLE LAB SESSION
+   LAB INCHARGE — GET SINGLE LAB SESSION (LAB SAFE)
 ====================================== */
 exports.getLabSessionDetail = async (req, res) => {
   try {
+    const labId = req.user.lab_id;
+
+    if (!labId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Lab access denied'
+      });
+    }
+
     const record = await Transaction.findOne({
       _id: req.params.id,
-      student_reg_no: 'LAB-SESSION'
+      transaction_type: 'lab_session',
+      'items.lab_id': labId
     })
-      .populate('items.item_id')
+      .populate('student_id', 'name reg_no email')
+      .populate('items.item_id', 'name sku tracking_type')
+      .populate('items.lab_id', 'name code')
       .populate('issued_by_incharge_id', 'name email')
       .lean();
 
     if (!record) {
-      return res.status(404).json({ message: 'Lab session not found' });
+      return res.status(404).json({
+        success: false,
+        message: 'Lab session not found or unauthorized'
+      });
     }
 
-    res.json({ success: true, data: record });
+    return res.json({
+      success: true,
+      data: record
+    });
+
   } catch (err) {
-    res.status(500).json({ message: 'Failed to fetch lab session' });
+    console.error('Get lab session detail error:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch lab session'
+    });
   }
 };
 
 /* ======================================
-   ADMIN — GET ALL LAB TRANSFERS
+   LAB INCHARGE — GET ALL LAB TRANSFERS (LAB SAFE)
 ====================================== */
 exports.getLabTransfers = async (req, res) => {
   try {
+    const labId = req.user.lab_id;
+
+    if (!labId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Lab access denied'
+      });
+    }
+
     const records = await Transaction.find({
-      student_reg_no: 'LAB-TRANSFER'
+      transaction_type: 'lab_transfer',
+      $or: [
+        { 'items.lab_id': labId },      // source lab
+        { target_lab_id: labId }        // target lab
+      ]
     })
-      .populate('issued_by_incharge_id', 'name email')
+      .populate('student_id', 'name reg_no email')
       .populate('items.item_id', 'name sku tracking_type')
+      .populate('items.lab_id', 'name code')
+      .populate('target_lab_id', 'name code')
+      .populate('issued_by_incharge_id', 'name email')
       .sort({ createdAt: -1 })
       .lean();
 
-    res.json({
+    return res.json({
       success: true,
       count: records.length,
       data: records
     });
+
   } catch (err) {
-    console.error('Admin get lab transfers error:', err);
-    res.status(500).json({ success: false, message: 'Failed to fetch lab transfers' });
+    console.error('Get lab transfers error:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch lab transfers'
+    });
   }
 };
-
 /* ======================================
-   ADMIN — GET SINGLE LAB TRANSFER
+   LAB INCHARGE — GET SINGLE LAB TRANSFER (LAB SAFE)
 ====================================== */
 exports.getLabTransferDetail = async (req, res) => {
   try {
+    const labId = req.user.lab_id;
+
+    if (!labId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Lab access denied'
+      });
+    }
+
     const record = await Transaction.findOne({
       _id: req.params.id,
-      student_reg_no: 'LAB-TRANSFER'
+      transaction_type: 'lab_transfer',
+      $or: [
+        { 'items.lab_id': labId },   // source lab
+        { target_lab_id: labId }     // target lab
+      ]
     })
-      .populate('items.item_id')
+      .populate('student_id', 'name reg_no email')
+      .populate('items.item_id', 'name sku tracking_type')
+      .populate('items.lab_id', 'name code')
+      .populate('target_lab_id', 'name code')
       .populate('issued_by_incharge_id', 'name email')
       .lean();
 
     if (!record) {
-      return res.status(404).json({ message: 'Lab transfer not found' });
+      return res.status(404).json({
+        success: false,
+        message: 'Lab transfer not found or unauthorized'
+      });
     }
 
-    res.json({ success: true, data: record });
+    return res.json({
+      success: true,
+      data: record
+    });
+
   } catch (err) {
-    res.status(500).json({ message: 'Failed to fetch lab transfer' });
+    console.error('Get lab transfer detail error:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch lab transfer'
+    });
   }
 };
+
 
 
 
 //feed back requests
 /* ============================
-   GET ALL COMPONENT REQUESTS
-   (with filters)
+   GET ALL COMPONENT REQUESTS (LAB SAFE)
 ============================ */
 exports.getAllComponentRequests = async (req, res) => {
   try {
+    const labId = req.user.lab_id;
+
+    if (!labId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Lab access denied'
+      });
+    }
+
     const {
       status,
       urgency,
@@ -518,27 +962,38 @@ exports.getAllComponentRequests = async (req, res) => {
       component_name
     } = req.query;
 
-    const filter = {};
+    /* ===============================
+       BASE FILTER (LAB ISOLATION)
+    =============================== */
+    const filter = {
+      lab_id: labId
+    };
 
+    /* ===============================
+       OPTIONAL FILTERS
+    =============================== */
     if (status) filter.status = status;
     if (urgency) filter.urgency = urgency;
     if (category) filter.category = category;
     if (student_reg_no) filter.student_reg_no = student_reg_no;
-    if (component_name)
+    if (component_name) {
       filter.component_name = new RegExp(component_name, 'i');
+    }
 
     const requests = await ComponentRequest.find(filter)
+      .populate('student_id', 'name reg_no email')
       .sort({ createdAt: -1 })
       .lean();
 
-    res.json({
+    return res.json({
       success: true,
       count: requests.length,
       data: requests
     });
+
   } catch (err) {
-    console.error('Admin get component requests error:', err);
-    res.status(500).json({
+    console.error('Get component requests error:', err);
+    return res.status(500).json({
       success: false,
       message: 'Failed to fetch component requests'
     });
@@ -546,53 +1001,88 @@ exports.getAllComponentRequests = async (req, res) => {
 };
 
 /* ============================
-   GET SINGLE COMPONENT REQUEST
+   GET SINGLE COMPONENT REQUEST (LAB SAFE)
 ============================ */
 exports.getComponentRequestById = async (req, res) => {
   try {
-    const request = await ComponentRequest.findById(req.params.id).lean();
+    const labId = req.user.lab_id;
+
+    if (!labId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Lab access denied'
+      });
+    }
+
+    const request = await ComponentRequest.findOne({
+      _id: req.params.id,
+      lab_id: labId
+    })
+      .populate('student_id', 'name reg_no email')
+      .lean();
 
     if (!request) {
       return res.status(404).json({
         success: false,
-        message: 'Component request not found'
+        message: 'Component request not found or unauthorized'
       });
     }
 
-    res.json({
+    return res.json({
       success: true,
       data: request
     });
+
   } catch (err) {
-    console.error('Admin get component request error:', err);
-    res.status(500).json({
+    console.error('Get component request error:', err);
+    return res.status(500).json({
       success: false,
       message: 'Failed to fetch component request'
     });
   }
 };
-
 /* ============================
-   UPDATE REQUEST STATUS
-   (approve / reject)
+   UPDATE COMPONENT REQUEST STATUS (LAB SAFE)
 ============================ */
 exports.updateComponentRequestStatus = async (req, res) => {
   try {
+    const labId = req.user.lab_id;
+
+    if (!labId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Lab access denied'
+      });
+    }
+
     const { status, admin_remarks } = req.body;
 
-    if (!['approved', 'rejected'].includes(status)) {
+    if (!['approved', 'rejected', 'reviewed'].includes(status)) {
       return res.status(400).json({
         success: false,
         message: 'Invalid status'
       });
     }
 
-    const request = await ComponentRequest.findById(req.params.id);
+    const request = await ComponentRequest.findOne({
+      _id: req.params.id,
+      lab_id: labId
+    });
 
     if (!request) {
       return res.status(404).json({
         success: false,
-        message: 'Component request not found'
+        message: 'Component request not found or unauthorized'
+      });
+    }
+
+    /* ===============================
+       PREVENT RE-UPDATING FINAL STATES
+    =============================== */
+    if (['approved', 'rejected'].includes(request.status)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Request already finalized'
       });
     }
 
@@ -601,13 +1091,15 @@ exports.updateComponentRequestStatus = async (req, res) => {
 
     await request.save();
 
-    res.json({
+    return res.json({
       success: true,
-      message: `Request ${status} successfully`
+      message: `Request ${status} successfully`,
+      data: request
     });
+
   } catch (err) {
-    console.error('Admin update component request error:', err);
-    res.status(500).json({
+    console.error('Update component request error:', err);
+    return res.status(500).json({
       success: false,
       message: 'Failed to update request'
     });
@@ -660,21 +1152,44 @@ exports.uploadBill = async (req, res) => {
 };
 
 /* ============================
-   GET BILLS
+   GET BILLS (LAB SAFE)
 ============================ */
 exports.getBills = async (req, res) => {
   try {
-    const { month, from, to } = req.query;
-    const filter = {};
+    const labId = req.user.lab_id;
 
+    if (!labId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Lab access denied'
+      });
+    }
+
+    const { month, from, to } = req.query;
+
+    const filter = {
+      lab_id: labId
+    };
+
+    /* ===============================
+       MONTH FILTER (YYYY-MM)
+    =============================== */
     if (month) {
       const [y, m] = month.split('-');
+
+      const start = new Date(`${y}-${m}-01`);
+      const end = new Date(start);
+      end.setMonth(end.getMonth() + 1);
+
       filter.bill_date = {
-        $gte: new Date(`${y}-${m}-01`),
-        $lt: new Date(`${y}-${Number(m) + 1}-01`)
+        $gte: start,
+        $lt: end
       };
     }
 
+    /* ===============================
+       DATE RANGE FILTER
+    =============================== */
     if (from && to) {
       filter.bill_date = {
         $gte: new Date(from),
@@ -687,19 +1202,46 @@ exports.getBills = async (req, res) => {
       .sort({ bill_date: -1, createdAt: -1 })
       .lean();
 
-    res.json({ success: true, count: bills.length, data: bills });
+    return res.json({
+      success: true,
+      count: bills.length,
+      data: bills
+    });
+
   } catch (err) {
-    res.status(500).json({ message: 'Failed to fetch bills' });
+    console.error('Get bills error:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch bills'
+    });
   }
 };
 
 /* ============================
-   DOWNLOAD / VIEW BILL (STREAM)
+   DOWNLOAD / VIEW BILL (LAB SAFE)
 ============================ */
 exports.downloadBill = async (req, res) => {
   try {
-    const bill = await Bill.findById(req.params.id);
-    if (!bill) return res.status(404).json({ message: 'Bill not found' });
+    const labId = req.user.lab_id;
+
+    if (!labId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Lab access denied'
+      });
+    }
+
+    const bill = await Bill.findOne({
+      _id: req.params.id,
+      lab_id: labId
+    });
+
+    if (!bill) {
+      return res.status(404).json({
+        success: false,
+        message: 'Bill not found or unauthorized'
+      });
+    }
 
     const stream = await s3.send(
       new GetObjectCommand({
@@ -715,18 +1257,28 @@ exports.downloadBill = async (req, res) => {
     );
 
     stream.Body.pipe(res);
+
   } catch (err) {
     console.error('Download bill error:', err);
-    res.status(500).json({ message: 'Failed to download bill' });
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to download bill'
+    });
   }
 };
 
 
-
-
-
 exports.getDamagedAssetHistory = async (req, res) => {
   try {
+    const labId = req.user.lab_id;
+
+    if (!labId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Lab access denied'
+      });
+    }
+
     const { item, vendor, status, from, to } = req.query;
 
     const matchStage = {};
@@ -753,7 +1305,7 @@ exports.getDamagedAssetHistory = async (req, res) => {
     const pipeline = [
       { $match: matchStage },
 
-      // Join ItemAsset
+      /* ===== JOIN ITEM ASSET ===== */
       {
         $lookup: {
           from: 'itemassets',
@@ -764,7 +1316,14 @@ exports.getDamagedAssetHistory = async (req, res) => {
       },
       { $unwind: '$asset' },
 
-      // Join Item
+      /* 🔒 LAB ISOLATION */
+      {
+        $match: {
+          'asset.lab_id': labId
+        }
+      },
+
+      /* ===== JOIN ITEM ===== */
       {
         $lookup: {
           from: 'items',
@@ -773,7 +1332,7 @@ exports.getDamagedAssetHistory = async (req, res) => {
           as: 'item'
         }
       },
-      { $unwind: '$item' },
+      { $unwind: '$item' }
     ];
 
     /* =====================
@@ -788,12 +1347,12 @@ exports.getDamagedAssetHistory = async (req, res) => {
     }
 
     /* =====================
-       VENDOR FILTER
+       VENDOR FILTER (FIXED)
     ===================== */
     if (vendor) {
       pipeline.push({
         $match: {
-          'item.vendor': { $regex: vendor, $options: 'i' }
+          'asset.vendor': { $regex: vendor, $options: 'i' }
         }
       });
     }
@@ -805,15 +1364,16 @@ exports.getDamagedAssetHistory = async (req, res) => {
       {
         $project: {
           _id: 1,
+
           asset_tag: '$asset.asset_tag',
           serial_no: '$asset.serial_no',
           asset_status: '$asset.status',
           asset_condition: '$asset.condition',
+          vendor: '$asset.vendor',
 
           item_name: '$item.name',
           sku: '$item.sku',
           category: '$item.category',
-          vendor: '$item.vendor',
 
           damage_status: '$status',
           damage_reason: '$damage_reason',
@@ -830,7 +1390,7 @@ exports.getDamagedAssetHistory = async (req, res) => {
 
     const records = await DamagedAssetLog.aggregate(pipeline);
 
-    res.json({
+    return res.json({
       success: true,
       count: records.length,
       data: records
@@ -838,11 +1398,10 @@ exports.getDamagedAssetHistory = async (req, res) => {
 
   } catch (error) {
     console.error('Damaged asset history error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: 'Failed to fetch damaged asset history'
     });
   }
 };
-
 
