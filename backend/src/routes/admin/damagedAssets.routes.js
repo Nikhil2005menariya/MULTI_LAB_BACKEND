@@ -9,7 +9,7 @@ const ItemAsset = require('../../models/ItemAsset');
 const Item = require('../../models/Item');
 
 // Admin only
-router.use(auth, role('admin'));
+router.use(auth, role('incharge'));
 
 /* =====================================================
    ✅ 1. DAMAGED ASSET HISTORY (FILTERABLE)

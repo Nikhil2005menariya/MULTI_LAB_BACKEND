@@ -5,7 +5,7 @@ const auth = require('../../middlewares/auth.middleware');
 const role = require('../../middlewares/role.middleware');
 
 // 🔒 Protect ALL admin routes
-router.use(auth, role('admin'));
+router.use(auth, role('incharge'));
 
 const itemRoutes = require('./items.routes');
 const transactionRoutes = require('./transactions.routes');

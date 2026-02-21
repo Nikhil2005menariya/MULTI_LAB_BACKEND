@@ -11,7 +11,7 @@ const {
   downloadBill
 } = require('../../controllers/admin.controller');
 
-router.use(auth, role('admin'));
+router.use(auth, role('incharge'));
 
 router.post('/', upload.single('file'), uploadBill);
 router.get('/', getBills);

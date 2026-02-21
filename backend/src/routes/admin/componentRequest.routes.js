@@ -11,7 +11,7 @@ const {
 } = require('../../controllers/admin.controller');
 
 // 🔒 Admin only
-router.use(auth, role('admin'));
+router.use(auth, role('incharge'));
 
 /**
  * GET /api/admin/component-requests

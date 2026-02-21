@@ -1,6 +1,9 @@
 const express = require('express');
 const router = express.Router();
 
+const auth = require('../../middlewares/auth.middleware');
+const role = require('../../middlewares/role.middleware');
+
 const {
   addItem,
   updateItem,
@@ -9,6 +12,8 @@ const {
   getItemById,
   getItemAssets, // 👈 ADD
 } = require('../../controllers/admin.controller');
+
+router.use(auth, role('incharge'));
 
 // POST - add new item
 router.post('/', addItem);

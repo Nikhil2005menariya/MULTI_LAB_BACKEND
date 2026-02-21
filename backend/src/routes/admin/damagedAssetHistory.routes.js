@@ -8,7 +8,7 @@ const {
   getDamagedAssetHistory
 } = require('../../controllers/admin.controller');
 
-router.use(auth, role('admin'));
+router.use(auth, role('incharge'));
 
 router.get('/history', getDamagedAssetHistory);
 
