@@ -1,6 +1,8 @@
 const Item = require('../models/Item');
 const ItemAsset = require('../models/ItemAsset');
 const Transaction = require('../models/Transaction');
+const LabInventory = require('../models/LabInventory');
+const Lab = require('../models/Lab');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const Staff = require('../models/Staff');
@@ -1402,6 +1404,309 @@ exports.getDamagedAssetHistory = async (req, res) => {
       success: false,
       message: 'Failed to fetch damaged asset history'
     });
+  }
+};
+
+
+// lab transfer routes
+exports.getAllLabs = async (req, res) => {
+  try {
+    const labId = req.user.lab_id;
+
+    const labs = await Lab.find({
+      _id: { $ne: labId },
+      is_active: true
+    }).select('name code location');
+
+    res.json({ success: true, data: labs });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to fetch labs' });
+  }
+};
+
+exports.getLabAvailableItems = async (req, res) => {
+  try {
+    const { labId } = req.params;
+
+    const inventory = await LabInventory.find({
+      lab_id: labId,
+      available_quantity: { $gt: 0 }
+    })
+      .populate('item_id', 'name sku tracking_type is_student_visible')
+      .lean();
+
+    res.json({
+      success: true,
+      count: inventory.length,
+      data: inventory
+    });
+
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to fetch items' });
+  }
+};
+
+exports.createTransferRequest = async (req, res) => {
+  try {
+    const sourceLabId = req.user.lab_id;
+
+    const {
+      target_lab_id,
+      items,
+      transfer_type,
+      expected_return_date
+    } = req.body;
+
+    if (!sourceLabId || sourceLabId.equals(target_lab_id)) {
+      return res.status(400).json({ message: 'Invalid target lab' });
+    }
+
+    const transaction = await Transaction.create({
+      transaction_id: `TR-${Date.now()}`,
+      project_name: 'Lab Transfer',
+      transaction_type: 'lab_transfer',
+      transfer_type,
+      source_lab_id: sourceLabId,
+      target_lab_id,
+      student_reg_no: 'LAB-TRANSFER',
+      status: 'raised',
+      expected_return_date:
+        transfer_type === 'temporary'
+          ? new Date(expected_return_date)
+          : null,
+      items: items.map(i => ({
+        lab_id: target_lab_id,
+        item_id: i.item_id,
+        quantity: i.quantity
+      }))
+    });
+
+    res.status(201).json({ success: true, data: transaction });
+
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getIncomingTransfers = async (req, res) => {
+  try {
+    const labId = req.user.lab_id;
+
+    const transfers = await Transaction.find({
+      transaction_type: 'lab_transfer',
+      target_lab_id: labId,
+      status: { $in: ['raised', 'return_requested'] }
+    }).populate('items.item_id', 'name sku tracking_type');
+
+    res.json({ success: true, data: transfers });
+
+  } catch (err) {
+    res.status(500).json({ success: false });
+  }
+};
+
+exports.getOutgoingTransfers = async (req, res) => {
+  try {
+    const labId = req.user.lab_id;
+
+    const transfers = await Transaction.find({
+      transaction_type: 'lab_transfer',
+      source_lab_id: labId
+    }).populate('items.item_id', 'name sku tracking_type');
+
+    res.json({ success: true, data: transfers });
+
+  } catch (err) {
+    res.status(500).json({ success: false });
+  }
+};
+
+exports.decideTransferRequest = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const labId = req.user.lab_id;
+    const { decision, reason } = req.body;
+
+    const transaction = await Transaction.findById(req.params.id).session(session);
+
+    if (!transaction || !transaction.target_lab_id.equals(labId)) {
+      throw new Error('Unauthorized');
+    }
+
+    if (decision === 'rejected') {
+      transaction.status = 'rejected';
+      transaction.faculty_approval.rejected_reason = reason || '';
+      await transaction.save({ session });
+      await session.commitTransaction();
+      return res.json({ success: true });
+    }
+
+    // APPROVAL LOGIC
+    for (const item of transaction.items) {
+
+      const inventory = await LabInventory.findOne({
+        lab_id: labId,
+        item_id: item.item_id
+      }).session(session);
+
+      if (!inventory || inventory.available_quantity < item.quantity) {
+        throw new Error('Insufficient stock');
+      }
+
+      const itemDef = await Item.findById(item.item_id);
+
+      // BULK
+      if (itemDef.tracking_type === 'bulk') {
+
+        inventory.available_quantity -= item.quantity;
+
+        if (transaction.transfer_type === 'permanent') {
+          inventory.total_quantity -= item.quantity;
+
+          await LabInventory.findOneAndUpdate(
+            { lab_id: transaction.source_lab_id, item_id: item.item_id },
+            { $inc: { total_quantity: item.quantity, available_quantity: item.quantity } },
+            { upsert: true, session }
+          );
+        }
+
+        await inventory.save({ session });
+      }
+
+      // ASSET
+      if (itemDef.tracking_type === 'asset') {
+
+        const assets = await ItemAsset.find({
+          lab_id: labId,
+          item_id: item.item_id,
+          status: 'available'
+        })
+          .limit(item.quantity)
+          .session(session);
+
+        if (assets.length < item.quantity) {
+          throw new Error('Not enough assets available');
+        }
+
+        item.asset_ids = assets.map(a => a._id);
+
+        for (const asset of assets) {
+
+          if (transaction.transfer_type === 'permanent') {
+            asset.lab_id = transaction.source_lab_id;
+            asset.status = 'available';
+          } else {
+            asset.status = 'issued';
+          }
+
+          await asset.save({ session });
+        }
+
+        inventory.available_quantity -= item.quantity;
+        if (transaction.transfer_type === 'permanent') {
+          inventory.total_quantity -= item.quantity;
+        }
+
+        await inventory.save({ session });
+      }
+    }
+
+    transaction.status = 'active';
+    transaction.issued_at = new Date();
+
+    await transaction.save({ session });
+
+    await session.commitTransaction();
+
+    res.json({ success: true, data: transaction });
+
+  } catch (err) {
+    await session.abortTransaction();
+    res.status(400).json({ success: false, message: err.message });
+  } finally {
+    session.endSession();
+  }
+};
+
+exports.initiateReturn = async (req, res) => {
+  try {
+    const labId = req.user.lab_id;
+
+    const transaction = await Transaction.findById(req.params.id);
+
+    if (!transaction ||
+        !transaction.source_lab_id.equals(labId) ||
+        transaction.transfer_type !== 'temporary' ||
+        transaction.status !== 'active') {
+      return res.status(400).json({ message: 'Invalid request' });
+    }
+
+    transaction.status = 'return_requested';
+    await transaction.save();
+
+    res.json({ success: true });
+
+  } catch (err) {
+    res.status(500).json({ success: false });
+  }
+};
+
+exports.completeReturn = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const labId = req.user.lab_id;
+
+    const transaction = await Transaction.findById(req.params.id).session(session);
+
+    if (!transaction ||
+        !transaction.target_lab_id.equals(labId) ||
+        transaction.status !== 'return_requested') {
+      throw new Error('Invalid request');
+    }
+
+    for (const item of transaction.items) {
+
+      const inventory = await LabInventory.findOne({
+        lab_id: labId,
+        item_id: item.item_id
+      }).session(session);
+
+      const itemDef = await Item.findById(item.item_id);
+
+      if (itemDef.tracking_type === 'bulk') {
+        inventory.available_quantity += item.quantity;
+      }
+
+      if (itemDef.tracking_type === 'asset') {
+        await ItemAsset.updateMany(
+          { _id: { $in: item.asset_ids } },
+          { $set: { status: 'available' } },
+          { session }
+        );
+
+        inventory.available_quantity += item.asset_ids.length;
+      }
+
+      await inventory.save({ session });
+    }
+
+    transaction.status = 'completed';
+    transaction.actual_return_date = new Date();
+    await transaction.save({ session });
+
+    await session.commitTransaction();
+
+    res.json({ success: true });
+
+  } catch (err) {
+    await session.abortTransaction();
+    res.status(400).json({ success: false, message: err.message });
+  } finally {
+    session.endSession();
   }
 };
 

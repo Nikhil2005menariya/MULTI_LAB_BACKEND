@@ -5,7 +5,7 @@ const mongoose = require('mongoose');
 ============================ */
 const transactionItemSchema = new mongoose.Schema(
   {
-    /* 🔥 REQUIRED — LAB BINDING PER ITEM */
+    /* 🔥 LAB FROM WHICH ITEM IS MOVING */
     lab_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Lab',
@@ -29,7 +29,7 @@ const transactionItemSchema = new mongoose.Schema(
     },
 
     /* =====================
-       ASSET TRACKING (STRICT RELATIONAL)
+       ASSET TRACKING
     ===================== */
     asset_ids: [
       {
@@ -39,7 +39,7 @@ const transactionItemSchema = new mongoose.Schema(
     ],
 
     /* =====================
-       SYSTEM MANAGED COUNTS
+       SYSTEM COUNTS
     ===================== */
     issued_quantity: {
       type: Number,
@@ -64,7 +64,7 @@ const transactionItemSchema = new mongoose.Schema(
 
 
 /* ============================
-   TRANSACTION SCHEMA (FINAL – CROSS LAB MODEL)
+   TRANSACTION SCHEMA
 ============================ */
 const transactionSchema = new mongoose.Schema(
   {
@@ -77,7 +77,8 @@ const transactionSchema = new mongoose.Schema(
       unique: true,
       index: true
     },
-      project_name: {
+
+    project_name: {
       type: String,
       required: true,
       trim: true,
@@ -95,7 +96,7 @@ const transactionSchema = new mongoose.Schema(
     },
 
     /* =====================
-       LAB TRANSFER ONLY
+       TRANSFER DETAILS
     ===================== */
     transfer_type: {
       type: String,
@@ -103,7 +104,20 @@ const transactionSchema = new mongoose.Schema(
       default: null
     },
 
-    /* 🔥 USE OBJECTID NOT NAME */
+    /* 🔥 SOURCE LAB (NEW) */
+    source_lab_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Lab',
+      default: null,
+      index: true
+    },
+
+    source_lab_name_snapshot: {
+      type: String,
+      default: null
+    },
+
+    /* 🔥 TARGET LAB */
     target_lab_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Lab',
@@ -116,20 +130,12 @@ const transactionSchema = new mongoose.Schema(
       default: null
     },
 
-    handover_faculty_name: {
-      type: String,
-      default: null
-    },
-
-    handover_faculty_email: {
-      type: String,
-      default: null
-    },
-
-    handover_faculty_id: {
-      type: String,
-      default: null
-    },
+    /* =====================
+       TRANSFER HANDOVER META
+    ===================== */
+    handover_faculty_name: String,
+    handover_faculty_email: String,
+    handover_faculty_id: String,
 
     /* =====================
        LAB SESSION ONLY
@@ -139,20 +145,19 @@ const transactionSchema = new mongoose.Schema(
       default: false
     },
 
-    lab_slot: {
-      type: String
-    },
+    lab_slot: String,
 
     /* =====================
-       STATUS (GLOBAL STATE)
+       STATUS
     ===================== */
     status: {
       type: String,
       enum: [
-        'raised',
-        'approved',
-        'active',
-        'completed',
+        'raised',           // created
+        'approved',         // optional stage
+        'active',           // issued / transferred
+        'return_requested', // temporary only
+        'completed',        // fully done
         'overdue',
         'rejected'
       ],
@@ -179,18 +184,11 @@ const transactionSchema = new mongoose.Schema(
     /* =====================
        FACULTY INFO
     ===================== */
-    faculty_email: {
-      type: String,
-      default: null
-    },
-
-    faculty_id: {
-      type: String,
-      default: null
-    },
+    faculty_email: String,
+    faculty_id: String,
 
     /* =====================
-       ITEMS (CROSS-LAB SAFE)
+       ITEMS
     ===================== */
     items: [transactionItemSchema],
 
@@ -203,7 +201,8 @@ const transactionSchema = new mongoose.Schema(
         default: false
       },
       approved_at: Date,
-      approval_token: String
+      approval_token: String,
+      rejected_reason: String
     },
 
     /* =====================
@@ -223,7 +222,7 @@ const transactionSchema = new mongoose.Schema(
       type: Date,
       required: function () {
         return (
-          this.transaction_type !== 'lab_transfer' ||
+          this.transaction_type === 'lab_transfer' &&
           this.transfer_type === 'temporary'
         );
       },
@@ -249,8 +248,11 @@ const transactionSchema = new mongoose.Schema(
 /* ============================
    INDEXING FOR SCALE
 ============================ */
+
 transactionSchema.index({ student_id: 1, status: 1 });
 transactionSchema.index({ transaction_type: 1, status: 1 });
+transactionSchema.index({ source_lab_id: 1, status: 1 });
+transactionSchema.index({ target_lab_id: 1, status: 1 });
 transactionSchema.index({ createdAt: -1 });
 
 module.exports = mongoose.model('Transaction', transactionSchema);

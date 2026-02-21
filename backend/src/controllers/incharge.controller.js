@@ -6,6 +6,7 @@ const Student = require('../models/Student');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const Staff = require('../models/Staff');
+
 const { sendMail } = require('../services/mail.service');
 
 /* ============================
