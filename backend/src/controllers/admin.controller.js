@@ -599,9 +599,6 @@ exports.getAllItems = async (req, res) => {
   }
 };
 
-/* ============================
-   TRANSACTION HISTORY (LAB SAFE)
-============================ */
 exports.getTransactionHistory = async (req, res) => {
   try {
     const labId = req.user.lab_id;
@@ -617,14 +614,26 @@ exports.getTransactionHistory = async (req, res) => {
     })
       .populate('student_id', 'name reg_no email')
       .populate('items.item_id', 'name sku tracking_type')
+      .populate('items.asset_ids', 'asset_tag') // 🔥 fetch asset tags
       .populate('issued_by_incharge_id', 'name email')
       .sort({ createdAt: -1 })
       .lean();
 
+    // Attach asset_tags array
+    const formatted = transactions.map(tx => ({
+      ...tx,
+      items: tx.items.map(item => ({
+        ...item,
+        asset_tags: item.asset_ids
+          ? item.asset_ids.map(asset => asset.asset_tag)
+          : []
+      }))
+    }));
+
     return res.json({
       success: true,
-      count: transactions.length,
-      data: transactions
+      count: formatted.length,
+      data: formatted
     });
 
   } catch (err) {
@@ -635,9 +644,6 @@ exports.getTransactionHistory = async (req, res) => {
   }
 };
 
-/* ============================
-   SEARCH TRANSACTIONS (LAB SAFE)
-============================ */
 exports.searchTransactions = async (req, res) => {
   try {
     const labId = req.user.lab_id;
@@ -656,47 +662,38 @@ exports.searchTransactions = async (req, res) => {
       status
     } = req.query;
 
-    /* ===============================
-       BASE FILTER (LAB ISOLATION)
-    =============================== */
     const filter = {
       'items.lab_id': labId
     };
 
-    /* ===============================
-       OPTIONAL SEARCH FILTERS
-    =============================== */
-    if (transaction_id) {
-      filter.transaction_id = transaction_id;
-    }
-
-    if (reg_no) {
-      filter.student_reg_no = reg_no;
-    }
-
-    if (faculty_email) {
-      filter.faculty_email = faculty_email;
-    }
-
-    if (faculty_id) {
-      filter.faculty_id = faculty_id;
-    }
-
-    if (status) {
-      filter.status = status;
-    }
+    if (transaction_id) filter.transaction_id = transaction_id;
+    if (reg_no) filter.student_reg_no = reg_no;
+    if (faculty_email) filter.faculty_email = faculty_email;
+    if (faculty_id) filter.faculty_id = faculty_id;
+    if (status) filter.status = status;
 
     const transactions = await Transaction.find(filter)
       .populate('student_id', 'name reg_no email')
       .populate('items.item_id', 'name sku tracking_type')
+      .populate('items.asset_ids', 'asset_tag') // 🔥 important
       .populate('issued_by_incharge_id', 'name email')
       .sort({ createdAt: -1 })
       .lean();
 
+    const formatted = transactions.map(tx => ({
+      ...tx,
+      items: tx.items.map(item => ({
+        ...item,
+        asset_tags: item.asset_ids
+          ? item.asset_ids.map(asset => asset.asset_tag)
+          : []
+      }))
+    }));
+
     return res.json({
       success: true,
-      count: transactions.length,
-      data: transactions
+      count: formatted.length,
+      data: formatted
     });
 
   } catch (err) {
