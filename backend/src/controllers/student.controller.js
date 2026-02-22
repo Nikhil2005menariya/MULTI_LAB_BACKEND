@@ -10,46 +10,145 @@ const ComponentRequest = require('../models/ComponentRequest');
 const { sendMail } = require('../services/mail.service');
 
 /* ============================
-   GET ALL ITEMS
+   GET ALL ITEMS (STUDENT SAFE)
 ============================ */
 exports.getAllItems = async (req, res) => {
   try {
-    const items = await Item.find(
-      { is_active: true, is_student_visible: true },
-      {
-        name: 1,
-        sku: 1,
-        category: 1,
-        description: 1,
-        tracking_type: 1,
-        available_quantity: 1,
-        temp_reserved_quantity: 1
-      }
-    ).sort({ name: 1 });
 
-    res.json({ success: true, data: items });
-  } catch {
-    res.status(500).json({ error: 'Failed to load items' });
+    const items = await LabInventory.aggregate([
+      {
+        $lookup: {
+          from: 'items',
+          localField: 'item_id',
+          foreignField: '_id',
+          as: 'item'
+        }
+      },
+      { $unwind: '$item' },
+
+      {
+        $match: {
+          'item.is_active': true,
+          'item.is_student_visible': true
+        }
+      },
+
+      {
+        $addFields: {
+          usable_quantity: {
+            $subtract: [
+              {
+                $subtract: [
+                  '$total_quantity',
+                  { $ifNull: ['$reserved_quantity', 0] }
+                ]
+              },
+              { $ifNull: ['$temp_reserved_quantity', 0] }
+            ]
+          }
+        }
+      },
+
+      {
+        $match: {
+          usable_quantity: { $gt: 0 }
+        }
+      },
+
+      {
+        $group: {
+          _id: '$item._id',
+          name: { $first: '$item.name' },
+          sku: { $first: '$item.sku' },
+          category: { $first: '$item.category' },
+          description: { $first: '$item.description' },
+          tracking_type: { $first: '$item.tracking_type' },
+          total_available: { $sum: '$usable_quantity' }
+        }
+      },
+
+      { $sort: { name: 1 } }
+    ]);
+
+    return res.json({
+      success: true,
+      data: items
+    });
+
+  } catch (err) {
+    return res.status(500).json({
+      error: 'Failed to load items'
+    });
   }
 };
-
 /* ============================
    GET ITEM LABS
 ============================ */
+
 exports.getItemLabs = async (req, res) => {
   try {
     const { item_id } = req.params;
 
-    const inventories = await LabInventory.find({
-      item_id,
-      available_quantity: { $gt: 0 }
-    })
-      .populate('lab_id', 'name code location')
-      .lean();
+    const inventories = await LabInventory.aggregate([
+      {
+        $match: {
+          item_id: new mongoose.Types.ObjectId(item_id)
+        }
+      },
+      {
+        $addFields: {
+          available_quantity: {
+            $subtract: [
+              {
+                $subtract: [
+                  '$total_quantity',
+                  { $ifNull: ['$reserved_quantity', 0] }
+                ]
+              },
+              { $ifNull: ['$temp_reserved_quantity', 0] }
+            ]
+          }
+        }
+      },
+      {
+        $match: {
+          available_quantity: { $gt: 0 }
+        }
+      },
+      {
+        $lookup: {
+          from: 'labs',
+          localField: 'lab_id',
+          foreignField: '_id',
+          as: 'lab_id'
+        }
+      },
+      { $unwind: '$lab_id' },
+      {
+        $project: {
+          _id: 1,
+          lab_id: {
+            _id: '$lab_id._id',
+            name: '$lab_id.name',
+            code: '$lab_id.code',
+            location: '$lab_id.location'
+          },
+          item_id: 1,
+          total_quantity: 1,
+          available_quantity: 1
+        }
+      }
+    ]);
 
-    res.json({ success: true, data: inventories });
+    return res.json({
+      success: true,
+      data: inventories
+    });
+
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    return res.status(500).json({
+      error: err.message
+    });
   }
 };
 
@@ -98,35 +197,41 @@ exports.raiseTransaction = async (req, res) => {
       });
     }
 
-    session.startTransaction();
+    await session.startTransaction();
 
     const normalizedItems = [];
 
     for (const reqItem of items) {
+
       const { item_id, lab_id, quantity } = reqItem;
 
       if (!quantity || quantity <= 0) {
         throw new Error('Invalid quantity');
       }
 
-      const item = await Item.findById(item_id).session(session);
       const labInventory = await LabInventory.findOne({
         lab_id,
-        item_id,
-        available_quantity: { $gte: quantity }
+        item_id
       }).session(session);
 
-      if (!item || !item.is_active || !labInventory) {
+      if (!labInventory) {
+        throw new Error('Item not found in selected lab');
+      }
+
+      const usable =
+        labInventory.total_quantity
+        - (labInventory.reserved_quantity || 0)
+        - (labInventory.temp_reserved_quantity || 0);
+
+      if (usable < quantity) {
         throw new Error('Insufficient stock in selected lab');
       }
 
-      // TEMP RESERVE LAB
-      labInventory.reserved_quantity += quantity;
-      await labInventory.save({ session });
+      // TEMP RESERVE
+      labInventory.temp_reserved_quantity =
+        (labInventory.temp_reserved_quantity || 0) + quantity;
 
-      // TEMP RESERVE GLOBAL
-      item.temp_reserved_quantity += quantity;
-      await item.save({ session });
+      await labInventory.save({ session });
 
       normalizedItems.push({
         lab_id,
@@ -141,16 +246,6 @@ exports.raiseTransaction = async (req, res) => {
 
     const approvalToken =
       crypto.randomBytes(32).toString('hex');
-
-    await sendMail({
-      to: faculty_email,
-      subject: 'IoT Lab Borrow Approval',
-      html: `
-        <p><b>${student.name}</b> requested components.</p>
-        <p><b>Project:</b> ${project_name}</p>
-        <p><b>Transaction ID:</b> ${transactionId}</p>
-      `
-    });
 
     const transaction = await Transaction.create([{
       transaction_id: transactionId,
@@ -171,6 +266,33 @@ exports.raiseTransaction = async (req, res) => {
     await session.commitTransaction();
     session.endSession();
 
+    /* ============================
+       SEND APPROVAL EMAIL
+    ============================ */
+
+    const approvalLink =
+      `${process.env.FRONTEND_URL}/faculty/approve?token=${approvalToken}`;
+
+    await sendMail({
+      to: faculty_email,
+      subject: `Approval Required – ${transactionId}`,
+      html: `
+        <h2>IoT Lab Borrow Request</h2>
+        <p><strong>Student:</strong> ${student.name} (${student.reg_no})</p>
+        <p><strong>Project:</strong> ${project_name}</p>
+        <p><strong>Transaction ID:</strong> ${transactionId}</p>
+        <p><strong>Expected Return:</strong> ${new Date(expected_return_date).toDateString()}</p>
+        <br/>
+        <a href="${approvalLink}" 
+           style="background:#2563eb;color:white;padding:10px 18px;
+                  text-decoration:none;border-radius:6px;">
+           Approve Request
+        </a>
+        <br/><br/>
+        <p>If you did not expect this request, you may ignore this email.</p>
+      `
+    });
+
     return res.status(201).json({
       success: true,
       transaction_id: transactionId,
@@ -178,6 +300,7 @@ exports.raiseTransaction = async (req, res) => {
     });
 
   } catch (err) {
+
     await session.abortTransaction();
     session.endSession();
 
@@ -188,7 +311,7 @@ exports.raiseTransaction = async (req, res) => {
 };
 
 /* ============================
-   GET MY TRANSACTIONS
+   GET MY TRANSACTIONS (WITH ASSET TAGS)
 ============================ */
 exports.getMyTransactions = async (req, res) => {
   try {
@@ -198,16 +321,31 @@ exports.getMyTransactions = async (req, res) => {
       .populate('items.item_id', 'name sku tracking_type')
       .populate('items.lab_id', 'name code')
       .populate('items.asset_ids', 'asset_tag serial_no')
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .lean();
 
-    res.json({ success: true, data: transactions });
-  } catch {
-    res.status(500).json({ error: 'Failed to load transactions' });
+    const formatted = transactions.map(tx => ({
+      ...tx,
+      items: tx.items.map(item => ({
+        ...item,
+        asset_tags: item.asset_ids?.map(a => a.asset_tag) || []
+      }))
+    }));
+
+    return res.json({
+      success: true,
+      data: formatted
+    });
+
+  } catch (err) {
+    return res.status(500).json({
+      error: 'Failed to load transactions'
+    });
   }
 };
 
 /* ============================
-   GET TRANSACTION BY ID
+   GET TRANSACTION BY ID (WITH ASSET TAGS)
 ============================ */
 exports.getTransactionById = async (req, res) => {
   try {
@@ -217,15 +355,32 @@ exports.getTransactionById = async (req, res) => {
     })
       .populate('items.item_id', 'name sku tracking_type')
       .populate('items.lab_id', 'name code location')
-      .populate('items.asset_ids', 'asset_tag serial_no');
+      .populate('items.asset_ids', 'asset_tag serial_no')
+      .lean();
 
     if (!transaction) {
-      return res.status(404).json({ error: 'Transaction not found' });
+      return res.status(404).json({
+        error: 'Transaction not found'
+      });
     }
 
-    res.json({ success: true, data: transaction });
-  } catch {
-    res.status(500).json({ error: 'Failed to fetch transaction' });
+    const formatted = {
+      ...transaction,
+      items: transaction.items.map(item => ({
+        ...item,
+        asset_tags: item.asset_ids?.map(a => a.asset_tag) || []
+      }))
+    };
+
+    return res.json({
+      success: true,
+      data: formatted
+    });
+
+  } catch (err) {
+    return res.status(500).json({
+      error: 'Failed to fetch transaction'
+    });
   }
 };
 
@@ -301,6 +456,9 @@ exports.extendReturnDate = async (req, res) => {
 
 
 
+/* ============================
+   REQUEST COMPONENT (UPDATED)
+============================ */
 exports.requestComponent = async (req, res) => {
   try {
     const {
@@ -325,10 +483,14 @@ exports.requestComponent = async (req, res) => {
       });
     }
 
-    const lab = await Lab.findById(lab_id);
+    const lab = await Lab.findOne({
+      _id: lab_id,
+      is_active: true
+    });
+
     if (!lab) {
       return res.status(404).json({
-        error: 'Lab not found'
+        error: 'Lab not found or inactive'
       });
     }
 
@@ -346,9 +508,13 @@ exports.requestComponent = async (req, res) => {
       status: 'pending'
     });
 
+    const populated = await ComponentRequest.findById(request._id)
+      .populate('lab_id', 'name code location')
+      .lean();
+
     return res.status(201).json({
       success: true,
-      data: request
+      data: populated
     });
 
   } catch (err) {
@@ -359,11 +525,15 @@ exports.requestComponent = async (req, res) => {
 };
 
 
+/* ============================
+   GET MY COMPONENT REQUESTS (WITH LAB INFO)
+============================ */
 exports.getMyComponentRequests = async (req, res) => {
   try {
     const requests = await ComponentRequest.find({
       student_id: req.user.id
     })
+      .populate('lab_id', 'name code location')
       .sort({ createdAt: -1 })
       .lean();
 
@@ -376,6 +546,30 @@ exports.getMyComponentRequests = async (req, res) => {
   } catch (err) {
     return res.status(500).json({
       error: 'Failed to fetch component requests'
+    });
+  }
+};
+
+
+/* ============================
+   GET ALL LABS (STUDENT)
+============================ */
+exports.getAllLabsForStudents = async (req, res) => {
+  try {
+    const labs = await Lab.find(
+      { is_active: true },
+      { name: 1, code: 1, location: 1 }
+    ).sort({ name: 1 });
+
+    return res.json({
+      success: true,
+      count: labs.length,
+      data: labs
+    });
+
+  } catch (err) {
+    return res.status(500).json({
+      error: 'Failed to load labs'
     });
   }
 };

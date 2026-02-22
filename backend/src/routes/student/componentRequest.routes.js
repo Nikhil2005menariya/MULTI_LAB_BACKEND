@@ -6,7 +6,8 @@ const role = require('../../middlewares/role.middleware');
 
 const {
   requestComponent,
-  getMyComponentRequests
+  getMyComponentRequests,
+  getAllLabsForStudents,
 } = require('../../controllers/student.controller');
 
 /* =====================================================
@@ -16,6 +17,9 @@ const {
 
 // 🔐 Student-only access
 router.use(auth, role('student'));
+
+
+router.get('/labs',getAllLabsForStudents);
 
 /* ============================
    CREATE COMPONENT REQUEST

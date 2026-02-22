@@ -34,6 +34,11 @@ const labInventorySchema = new mongoose.Schema(
     damaged_quantity: {
       type: Number,
       default: 0
+    },
+    temp_reserved_quantity: {
+      type: Number,
+      default: 0,
+      min: 0
     }
   },
   { timestamps: true }
