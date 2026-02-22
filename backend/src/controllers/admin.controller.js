@@ -1156,17 +1156,28 @@ exports.updateComponentRequestStatus = async (req, res) => {
 
 
 /* ============================
-   UPLOAD BILL (S3)
+   UPLOAD BILL (S3 + INVOICE)
 ============================ */
 exports.uploadBill = async (req, res) => {
   try {
-    const { title, bill_type, bill_date } = req.body;
+    const labId = req.user.lab_id;
+    const { title, bill_type, bill_date, invoice_number } = req.body;
 
-    if (!title || !bill_date || !req.file) {
-      return res.status(400).json({ message: 'Missing required fields' });
+    if (!labId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Lab access denied'
+      });
     }
 
-    const s3Key = `bills/${Date.now()}-${req.file.originalname}`;
+    if (!title || !bill_date || !invoice_number || !req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'Title, bill date, invoice number and PDF file are required'
+      });
+    }
+
+    const s3Key = `bills/${labId}/${Date.now()}-${req.file.originalname}`;
 
     await s3.send(
       new PutObjectCommand({
@@ -1178,15 +1189,17 @@ exports.uploadBill = async (req, res) => {
     );
 
     const bill = await Bill.create({
+      lab_id: labId,
       title,
       bill_type,
+      invoice_number,
       bill_date: new Date(bill_date),
       s3_key: s3Key,
       s3_url: `https://${process.env.AWS_S3_BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com/${s3Key}`,
       uploaded_by: req.user.id
     });
 
-    res.status(201).json({
+    return res.status(201).json({
       success: true,
       message: 'Bill uploaded successfully',
       data: bill
@@ -1194,12 +1207,15 @@ exports.uploadBill = async (req, res) => {
 
   } catch (err) {
     console.error('Upload bill error:', err);
-    res.status(500).json({ message: 'Failed to upload bill' });
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to upload bill'
+    });
   }
 };
 
 /* ============================
-   GET BILLS (LAB SAFE)
+   GET BILLS (ADVANCED FILTERING)
 ============================ */
 exports.getBills = async (req, res) => {
   try {
@@ -1212,11 +1228,46 @@ exports.getBills = async (req, res) => {
       });
     }
 
-    const { month, from, to } = req.query;
+    const {
+      month,
+      from,
+      to,
+      date,
+      invoice_number,
+      bill_type
+    } = req.query;
 
     const filter = {
       lab_id: labId
     };
+
+    /* ===============================
+       FILTER BY INVOICE NUMBER
+    =============================== */
+    if (invoice_number) {
+      filter.invoice_number = invoice_number;
+    }
+
+    /* ===============================
+       FILTER BY BILL TYPE
+    =============================== */
+    if (bill_type) {
+      filter.bill_type = bill_type;
+    }
+
+    /* ===============================
+       FILTER BY PARTICULAR DATE
+    =============================== */
+    if (date) {
+      const start = new Date(date);
+      const end = new Date(date);
+      end.setDate(end.getDate() + 1);
+
+      filter.bill_date = {
+        $gte: start,
+        $lt: end
+      };
+    }
 
     /* ===============================
        MONTH FILTER (YYYY-MM)

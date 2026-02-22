@@ -3,7 +3,7 @@ const mongoose = require('mongoose');
 const billSchema = new mongoose.Schema(
   {
     /* ============================
-       LAB REFERENCE (NEW - REQUIRED)
+       LAB REFERENCE (REQUIRED)
     ============================ */
     lab_id: {
       type: mongoose.Schema.Types.ObjectId,
@@ -41,6 +41,16 @@ const billSchema = new mongoose.Schema(
     },
 
     /* ============================
+       🆕 INVOICE NUMBER
+    ============================ */
+    invoice_number: {
+      type: String,
+      required: true,
+      trim: true,
+      index: true
+    },
+
+    /* ============================
        S3 STORAGE DETAILS
     ============================ */
     s3_key: {
@@ -67,6 +77,15 @@ const billSchema = new mongoose.Schema(
   {
     timestamps: true
   }
+);
+
+/* ============================
+   OPTIONAL: LAB-SCOPED UNIQUE INVOICE
+   (Recommended for real systems)
+============================ */
+billSchema.index(
+  { lab_id: 1, invoice_number: 1 },
+  { unique: true }
 );
 
 module.exports = mongoose.model('Bill', billSchema);
