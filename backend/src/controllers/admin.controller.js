@@ -20,7 +20,7 @@ const s3 = require('../utils/s3');
 ========================= */
 
 /* ============================
-   ADD ITEM (FINAL – SAFE)
+   ADD ITEM (FINAL – WITH RESERVED SUPPORT)
 ============================ */
 exports.addItem = async (req, res) => {
   try {
@@ -33,10 +33,13 @@ exports.addItem = async (req, res) => {
       description,
       tracking_type,
       initial_quantity,
+      reserved_quantity = 0,   // 🔥 NEW
       vendor,
       invoice_number,
       asset_prefix
     } = req.body;
+
+    /* ================= VALIDATIONS ================= */
 
     if (!labId) {
       return res.status(403).json({ error: 'Lab access denied' });
@@ -46,53 +49,70 @@ exports.addItem = async (req, res) => {
       return res.status(400).json({ error: 'Vendor is required' });
     }
 
-    if (!initial_quantity || initial_quantity <= 0) {
+    const qty = Number(initial_quantity);
+    const reservedQty = Number(reserved_quantity);
+
+    if (!qty || qty <= 0) {
       return res.status(400).json({
         error: 'Initial quantity must be greater than 0'
       });
     }
 
-    /* ================= CREATE ITEM (GLOBAL DEF ONLY) ================= */
+    if (reservedQty < 0 || reservedQty > qty) {
+      return res.status(400).json({
+        error: 'Reserved quantity must be between 0 and initial quantity'
+      });
+    }
+
+    /* ================= CREATE / FIND GLOBAL ITEM ================= */
+
     let item = await Item.findOne({ sku });
 
     if (!item) {
-          item = await Item.create({
-            name,
-            sku,
-            category,
-            description,
-            tracking_type,
-            is_student_visible:
-              typeof req.body.is_student_visible === 'boolean'
-                ? req.body.is_student_visible
-                : true,
-            total_quantity: 0,
-            available_quantity: 0
-          });
+      item = await Item.create({
+        name,
+        sku,
+        category,
+        description,
+        tracking_type,
+        is_student_visible:
+          typeof req.body.is_student_visible === 'boolean'
+            ? req.body.is_student_visible
+            : true,
+        total_quantity: 0,
+        available_quantity: 0
+      });
     }
 
     /* ================= CREATE LAB INVENTORY ================= */
-    const inventory = await require('../models/LabInventory').create({
+
+    const LabInventory = require('../models/LabInventory');
+
+    const inventory = await LabInventory.create({
       lab_id: labId,
       item_id: item._id,
-      total_quantity: initial_quantity,
-      available_quantity: initial_quantity
+      total_quantity: qty,
+      reserved_quantity: reservedQty,
+      available_quantity: qty - reservedQty   // 🔥 CRITICAL
     });
 
-    /* ================= CREATE ASSETS (IF ASSET) ================= */
+    /* ================= CREATE ASSETS (IF ASSET TRACKED) ================= */
+
     const createdAssets = [];
 
     if (tracking_type === 'asset') {
+
       const prefix = asset_prefix || sku;
 
-      for (let i = 1; i <= initial_quantity; i++) {
+      for (let i = 1; i <= qty; i++) {
+
         const assetTag = `${prefix}-${String(i).padStart(4, '0')}`;
 
         const asset = await ItemAsset.create({
           lab_id: labId,
           item_id: item._id,
           asset_tag: assetTag,
-          vendor, // 🔥 NEW vendor
+          vendor,
           invoice_number,
           status: 'available',
           condition: 'good'
@@ -101,6 +121,8 @@ exports.addItem = async (req, res) => {
         createdAssets.push(asset.asset_tag);
       }
     }
+
+    /* ================= RESPONSE ================= */
 
     return res.status(201).json({
       success: true,
@@ -111,9 +133,16 @@ exports.addItem = async (req, res) => {
 
   } catch (err) {
     console.error('ADD ITEM ERROR:', err);
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({
+      success: false,
+      error: err.message
+    });
   }
 };
+
+/* ============================
+   UPDATE ITEM (FINAL – WITH RESERVED SUPPORT)
+============================ */
 exports.updateItem = async (req, res) => {
   try {
     const labId = req.user.lab_id;
@@ -139,11 +168,13 @@ exports.updateItem = async (req, res) => {
 
     const addQty = Number(req.body.add_quantity || 0);
     const removeAssetTags = req.body.remove_asset_tags || [];
+    const newReserved =
+      req.body.reserved_quantity !== undefined
+        ? Number(req.body.reserved_quantity)
+        : undefined;
+
     const createdAssets = [];
 
-    /* ===============================
-       FETCH LAB INVENTORY (STRICT)
-    =============================== */
     const LabInventory = require('../models/LabInventory');
 
     const inventory = await LabInventory.findOne({
@@ -157,9 +188,9 @@ exports.updateItem = async (req, res) => {
       });
     }
 
-    /* ===============================
-       ENSURE last_asset_seq EXISTS
-    =============================== */
+    /* ==================================================
+       ENSURE last_asset_seq EXISTS (FOR ASSET ITEMS)
+    ================================================== */
     if (
       item.tracking_type === 'asset' &&
       typeof item.last_asset_seq !== 'number'
@@ -179,9 +210,9 @@ exports.updateItem = async (req, res) => {
       }
     }
 
-    /* ===============================
+    /* ==================================================
        ADD STOCK
-    =============================== */
+    ================================================== */
     if (addQty > 0) {
 
       if (!req.body.vendor) {
@@ -192,19 +223,13 @@ exports.updateItem = async (req, res) => {
 
       // BULK
       if (item.tracking_type === 'bulk') {
-
         inventory.total_quantity += addQty;
-        inventory.available_quantity += addQty;
-
-        item.total_quantity += addQty;
-        item.available_quantity += addQty;
       }
 
       // ASSET
       if (item.tracking_type === 'asset') {
 
         for (let i = 0; i < addQty; i++) {
-
           item.last_asset_seq = (item.last_asset_seq || 0) + 1;
 
           const assetTag = `${item.sku}-${String(
@@ -215,28 +240,22 @@ exports.updateItem = async (req, res) => {
             lab_id: labId,
             item_id: item._id,
             asset_tag: assetTag,
-            vendor: req.body.vendor,           // 🔥 new vendor only for new stock
+            vendor: req.body.vendor,
             invoice_number: req.body.invoice_number,
             status: 'available',
             condition: 'good'
           });
 
-          createdAssets.push(asset); // backward compatible
+          createdAssets.push(asset.asset_tag);
         }
 
         inventory.total_quantity += addQty;
-        inventory.available_quantity += addQty;
-
-        item.total_quantity += addQty;
-        item.available_quantity += addQty;
       }
-
-      await inventory.save();
     }
 
-    /* ===============================
-       REMOVE ASSET STOCK
-    =============================== */
+    /* ==================================================
+       REMOVE STOCK (ASSET)
+    ================================================== */
     if (
       addQty < 0 &&
       item.tracking_type === 'asset' &&
@@ -255,44 +274,74 @@ exports.updateItem = async (req, res) => {
         });
       }
 
+      // Prevent removing reserved stock
+      const effectiveAvailable =
+        inventory.total_quantity - inventory.reserved_quantity;
+
+      if (assets.length > effectiveAvailable) {
+        return res.status(400).json({
+          error: 'Cannot remove reserved stock'
+        });
+      }
+
       await ItemAsset.updateMany(
         { _id: { $in: assets.map(a => a._id) } },
         { $set: { status: 'retired', condition: 'broken' } }
       );
 
       inventory.total_quantity -= assets.length;
-      inventory.available_quantity -= assets.length;
-
-      item.total_quantity -= assets.length;
-      item.available_quantity -= assets.length;
-
-      await inventory.save();
     }
 
-    /* ===============================
-       REMOVE BULK STOCK
-    =============================== */
+    /* ==================================================
+       REMOVE STOCK (BULK)
+    ================================================== */
     if (addQty < 0 && item.tracking_type === 'bulk') {
+
       const removeQty = Math.abs(addQty);
 
-      if (removeQty > inventory.available_quantity) {
+      const effectiveAvailable =
+        inventory.total_quantity - inventory.reserved_quantity;
+
+      if (removeQty > effectiveAvailable) {
         return res.status(400).json({
-          error: 'Cannot remove more than available quantity'
+          error: 'Cannot remove reserved stock'
         });
       }
 
       inventory.total_quantity -= removeQty;
-      inventory.available_quantity -= removeQty;
-
-      item.total_quantity -= removeQty;
-      item.available_quantity -= removeQty;
-
-      await inventory.save();
     }
 
-    /* ===============================
-       SAFE FIELD UPDATES (WHITELIST)
-    =============================== */
+    /* ==================================================
+       UPDATE RESERVED QUANTITY
+    ================================================== */
+    if (newReserved !== undefined) {
+
+      if (newReserved < 0 || newReserved > inventory.total_quantity) {
+        return res.status(400).json({
+          error: 'Reserved quantity must be between 0 and total quantity'
+        });
+      }
+
+      inventory.reserved_quantity = newReserved;
+    }
+
+    /* ==================================================
+       ALWAYS RECALCULATE AVAILABLE
+    ================================================== */
+    inventory.available_quantity =
+      inventory.total_quantity - inventory.reserved_quantity;
+
+    if (inventory.available_quantity < 0) {
+      return res.status(400).json({
+        error: 'Reserved quantity exceeds total stock'
+      });
+    }
+
+    await inventory.save();
+
+    /* ==================================================
+       SAFE FIELD UPDATES
+    ================================================== */
 
     if (req.body.name !== undefined)
       item.name = req.body.name;
@@ -306,20 +355,18 @@ exports.updateItem = async (req, res) => {
     if (typeof req.body.is_student_visible === 'boolean')
       item.is_student_visible = req.body.is_student_visible;
 
-    /* ===============================
-       SAVE ITEM
-    =============================== */
     await item.save();
 
     return res.json({
       success: true,
-      data: item,
+      inventory,
       created_assets: createdAssets
     });
 
   } catch (err) {
     console.error('UPDATE ITEM ERROR:', err);
     return res.status(500).json({
+      success: false,
       error: err.message
     });
   }
@@ -1425,25 +1472,45 @@ exports.getAllLabs = async (req, res) => {
   }
 };
 
+/* =========================
+   GET LAB AVAILABLE ITEMS
+   (RESERVED SAFE)
+========================= */
 exports.getLabAvailableItems = async (req, res) => {
   try {
     const { labId } = req.params;
 
     const inventory = await LabInventory.find({
-      lab_id: labId,
-      available_quantity: { $gt: 0 }
+      lab_id: labId
     })
       .populate('item_id', 'name sku tracking_type is_student_visible')
       .lean();
 
+    // Recalculate effective availability
+    const filtered = inventory
+      .map(inv => {
+        const effectiveAvailable =
+          inv.total_quantity - (inv.reserved_quantity || 0);
+
+        return {
+          ...inv,
+          available_quantity: effectiveAvailable
+        };
+      })
+      .filter(inv => inv.available_quantity > 0);
+
     res.json({
       success: true,
-      count: inventory.length,
-      data: inventory
+      count: filtered.length,
+      data: filtered
     });
 
   } catch (err) {
-    res.status(500).json({ success: false, message: 'Failed to fetch items' });
+    console.error('GET LAB AVAILABLE ITEMS ERROR:', err);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch items'
+    });
   }
 };
 
