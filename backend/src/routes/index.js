@@ -7,6 +7,7 @@ router.use('/auth/staff', require('./auth/staff.routes'));
 router.use('/auth/student', require('./auth/student.routes'));
 router.use('/faculty', require('./faculty'));
 router.use('/incharge', require('./incharge'));
+router.use('/super-admin', require('./super_admin'));
 
 
 

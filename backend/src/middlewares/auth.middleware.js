@@ -1,13 +1,41 @@
 const jwt = require('jsonwebtoken');
+const Staff = require('../models/Staff');
+const Student = require('../models/Student');
 
-module.exports = (req, res, next) => {
-  const token = req.headers.authorization?.split(' ')[1];
-  if (!token) return res.status(401).json({ error: 'No token provided' });
-
+module.exports = async (req, res, next) => {
   try {
-    req.user = jwt.verify(token, process.env.JWT_SECRET);
+    const authHeader = req.headers.authorization;
+
+    // Validate Bearer format
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'No token provided' });
+    }
+
+    const token = authHeader.split(' ')[1];
+
+    // Verify JWT
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+    let user = null;
+
+    // Check based on role
+    if (decoded.role === 'student') {
+      user = await Student.findById(decoded.id);
+      if (!user || !user.is_verified) {
+        return res.status(401).json({ error: 'User no longer valid' });
+      }
+    } else {
+      user = await Staff.findById(decoded.id);
+      if (!user || !user.is_active) {
+        return res.status(401).json({ error: 'User no longer valid' });
+      }
+    }
+
+    // Attach full decoded token
+    req.user = decoded;
+
     next();
-  } catch {
-    res.status(401).json({ error: 'Invalid token' });
+  } catch (err) {
+    return res.status(401).json({ error: 'Invalid or expired token' });
   }
 };
