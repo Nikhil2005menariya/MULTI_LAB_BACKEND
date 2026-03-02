@@ -12,10 +12,24 @@ const { sendMail } = require('../services/mail.service');
 /* ============================
    GET ALL ITEMS (STUDENT SAFE)
 ============================ */
+/* ============================
+   GET ALL ITEMS (STUDENT SAFE – FINAL STRICT VERSION)
+============================ */
+/* ============================
+   GET ALL ITEMS (STUDENT SAFE)
+============================ */
 exports.getAllItems = async (req, res) => {
   try {
 
     const items = await LabInventory.aggregate([
+
+      /* 🔥 LAB-SCOPED VISIBILITY FIX */
+      {
+        $match: {
+          is_student_visible: true
+        }
+      },
+
       {
         $lookup: {
           from: 'items',
@@ -28,8 +42,7 @@ exports.getAllItems = async (req, res) => {
 
       {
         $match: {
-          'item.is_active': true,
-          'item.is_student_visible': true
+          'item.is_active': true
         }
       },
 
@@ -84,17 +97,25 @@ exports.getAllItems = async (req, res) => {
 /* ============================
    GET ITEM LABS
 ============================ */
-
+/* ============================
+   GET ITEM LABS (LAB VISIBILITY FIXED)
+============================ */
+/* ============================
+   GET ITEM LABS
+============================ */
 exports.getItemLabs = async (req, res) => {
   try {
     const { item_id } = req.params;
 
     const inventories = await LabInventory.aggregate([
+
       {
         $match: {
-          item_id: new mongoose.Types.ObjectId(item_id)
+          item_id: new mongoose.Types.ObjectId(item_id),
+          is_student_visible: true   // 🔥 FIXED HERE
         }
       },
+
       {
         $addFields: {
           available_quantity: {
@@ -110,11 +131,13 @@ exports.getItemLabs = async (req, res) => {
           }
         }
       },
+
       {
         $match: {
           available_quantity: { $gt: 0 }
         }
       },
+
       {
         $lookup: {
           from: 'labs',
@@ -123,7 +146,9 @@ exports.getItemLabs = async (req, res) => {
           as: 'lab_id'
         }
       },
+
       { $unwind: '$lab_id' },
+
       {
         $project: {
           _id: 1,

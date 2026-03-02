@@ -39,6 +39,11 @@ const labInventorySchema = new mongoose.Schema(
       type: Number,
       default: 0,
       min: 0
+    },
+    is_student_visible: {
+      type: Boolean,
+      default: true,
+      index: true
     }
   },
   { timestamps: true }

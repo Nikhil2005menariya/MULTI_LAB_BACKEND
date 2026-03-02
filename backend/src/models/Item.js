@@ -25,15 +25,6 @@ const itemSchema = new mongoose.Schema(
     description: String,
 
     /* =========================
-       STUDENT VISIBILITY
-    ========================= */
-    is_student_visible: {
-      type: Boolean,
-      default: true,
-      index: true
-    },
-
-    /* =========================
        INVENTORY COUNTS (GLOBAL TOTAL)
     ========================= */
     total_quantity: {
