@@ -8,7 +8,7 @@ const crypto = require('crypto');
 const Item = require('../models/Item');
 const ItemAsset = require('../models/ItemAsset');
 const mongoose = require('mongoose');
-
+const adminController = require('./admin.controller');
 const inchargeController = require('./incharge.controller');
 
 /* =====================================================
@@ -633,19 +633,231 @@ exports.getItemAnalytics = async (req, res) => {
   }
 };
 
-/* =====================================================
-   SUPER ADMIN = LAB INCHARGE FOR ANY LAB
-   Proxy Calls to Incharge Controllers
-===================================================== */
 
-// exports.issueTransaction = inchargeController.issueTransaction;
-// exports.returnTransaction = inchargeController.returnTransaction;
-exports.getActiveTransactions = inchargeController.getActiveTransactions;
-exports.getPendingTransactions = inchargeController.getPendingTransactions;
-exports.getAvailableAssetsByItem = inchargeController.getAvailableAssetsByItem;
-// exports.issueLabSession = inchargeController.issueLabSession;
-exports.getAvailableLabItems = inchargeController.getAvailableLabItems;
-exports.searchLabItems = inchargeController.searchLabItems;
-exports.getActiveLabSessions = inchargeController.getActiveLabSessions;
-// exports.issueLabTransfer = inchargeController.issueLabTransfer;
-exports.getActiveLabTransfers = inchargeController.getActiveLabTransfers;
+
+const executeInLabContext = async (req, res, labId, handler) => {
+  try {
+    const lab = await Lab.findById(labId);
+
+    if (!lab || !lab.is_active) {
+      return res.status(404).json({
+        success: false,
+        message: 'Invalid or inactive lab'
+      });
+    }
+
+    // Inject lab context
+    req.user.lab_id = labId;
+
+    return handler(req, res);
+
+  } catch (err) {
+    console.error('Lab context error:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to process lab-scoped request'
+    });
+  }
+};
+
+/* ================= INVENTORY ================= */
+
+exports.getAllItems = async (req, res) =>
+  executeInLabContext(req, res, req.params.labId, adminController.getAllItems);
+
+exports.getItemById = async (req, res) =>
+  executeInLabContext(req, res, req.params.labId, adminController.getItemById);
+
+exports.getItemAssets = async (req, res) =>
+  executeInLabContext(req, res, req.params.labId, adminController.getItemAssets);
+
+exports.getLabAvailableItems = async (req, res) =>
+  executeInLabContext(req, res, req.params.labId, adminController.getLabAvailableItems);
+
+/* ================= TRANSACTIONS ================= */
+
+exports.getTransactionHistory = async (req, res) =>
+  executeInLabContext(req, res, req.params.labId, adminController.getTransactionHistory);
+
+exports.searchTransactions = async (req, res) =>
+  executeInLabContext(req, res, req.params.labId, adminController.searchTransactions);
+
+exports.getOverdueTransactions = async (req, res) =>
+  executeInLabContext(req, res, req.params.labId, adminController.getOverdueTransactions);
+
+/* ================= LAB SESSIONS ================= */
+
+exports.getLabSessions = async (req, res) =>
+  executeInLabContext(req, res, req.params.labId, adminController.getLabSessions);
+
+exports.getLabSessionDetail = async (req, res) =>
+  executeInLabContext(req, res, req.params.labId, adminController.getLabSessionDetail);
+
+/* ================= LAB TRANSFERS ================= */
+
+
+exports.getLabTransfers = async (req, res) => {
+  try {
+    const { labId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(labId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid lab id'
+      });
+    }
+
+    const labObjectId = new mongoose.Types.ObjectId(labId);
+
+    const records = await Transaction.find({
+      transaction_type: 'lab_transfer',
+      $or: [
+        { source_lab_id: labObjectId },
+        { target_lab_id: labObjectId }
+      ]
+    })
+      .populate('source_lab_id', 'name code location')
+      .populate('target_lab_id', 'name code location')
+      .populate('items.item_id', 'name sku tracking_type')
+      .populate('items.asset_ids', 'asset_tag')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const formatted = records.map(t => ({
+      _id: t._id,
+      transaction_id: t.transaction_id,
+      project_name: t.project_name,
+      transfer_type: t.transfer_type,
+      status: t.status,
+      expected_return_date: t.expected_return_date,
+      actual_return_date: t.actual_return_date,
+      issued_at: t.issued_at,
+      createdAt: t.createdAt,
+
+      /* 🔥 NORMALIZED LAB OBJECTS */
+      source_lab: t.source_lab_id
+        ? {
+            _id: t.source_lab_id._id,
+            name: t.source_lab_id.name,
+            code: t.source_lab_id.code,
+            location: t.source_lab_id.location
+          }
+        : null,
+
+      target_lab: t.target_lab_id
+        ? {
+            _id: t.target_lab_id._id,
+            name: t.target_lab_id.name,
+            code: t.target_lab_id.code,
+            location: t.target_lab_id.location
+          }
+        : null,
+
+      /* ITEMS */
+      items: t.items.map(i => ({
+        ...i,
+        asset_tags: i.asset_ids?.map(a => a.asset_tag) || []
+      }))
+    }));
+
+    return res.json({
+      success: true,
+      count: formatted.length,
+      data: formatted
+    });
+
+  } catch (err) {
+    console.error('Super Admin get transfers error:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch lab transfers'
+    });
+  }
+};
+exports.getLabTransferDetail = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid transfer id'
+      });
+    }
+
+    const record = await Transaction.findOne({
+      _id: id,
+      transaction_type: 'lab_transfer'
+    })
+      .populate('source_lab_id', 'name code location')
+      .populate('target_lab_id', 'name code location')
+      .populate('items.item_id', 'name sku tracking_type')
+      .populate('items.asset_ids', 'asset_tag')
+      .populate('issued_by_incharge_id', 'name email')
+      .lean();
+
+    if (!record) {
+      return res.status(404).json({
+        success: false,
+        message: 'Transfer not found'
+      });
+    }
+
+    record.source_lab = record.source_lab_id
+      ? {
+          _id: record.source_lab_id._id,
+          name: record.source_lab_id.name,
+          code: record.source_lab_id.code,
+          location: record.source_lab_id.location
+        }
+      : null;
+
+    record.target_lab = record.target_lab_id
+      ? {
+          _id: record.target_lab_id._id,
+          name: record.target_lab_id.name,
+          code: record.target_lab_id.code,
+          location: record.target_lab_id.location
+        }
+      : null;
+
+    record.items = record.items.map(i => ({
+      ...i,
+      asset_tags: i.asset_ids?.map(a => a.asset_tag) || []
+    }));
+
+    return res.json({
+      success: true,
+      data: record
+    });
+
+  } catch (err) {
+    console.error('Super Admin get transfer detail error:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch transfer'
+    });
+  }
+};
+/* ================= COMPONENT REQUESTS ================= */
+
+exports.getAllComponentRequests = async (req, res) =>
+  executeInLabContext(req, res, req.params.labId, adminController.getAllComponentRequests);
+
+exports.getComponentRequestById = async (req, res) =>
+  executeInLabContext(req, res, req.params.labId, adminController.getComponentRequestById);
+
+
+/* ================= BILLS ================= */
+
+exports.getBills = async (req, res) =>
+  executeInLabContext(req, res, req.params.labId, adminController.getBills);
+
+exports.downloadBill = async (req, res) =>
+  executeInLabContext(req, res, req.params.labId, adminController.downloadBill);
+
+/* ================= DAMAGED ASSET HISTORY ================= */
+
+exports.getDamagedAssetHistory = async (req, res) =>
+  executeInLabContext(req, res, req.params.labId, adminController.getDamagedAssetHistory);
+

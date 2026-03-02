@@ -5,26 +5,34 @@ const auth = require('../../middlewares/auth.middleware');
 const role = require('../../middlewares/role.middleware');
 
 const {
-  issueTransaction,
-  returnTransaction,
-  getActiveTransactions,
-  getPendingTransactions,
-  getAvailableAssetsByItem
+  getTransactionHistory,
+  searchTransactions,
+  getOverdueTransactions
 } = require('../../controllers/super_admin.controller');
+
+/* =====================================================
+   SUPER ADMIN – LAB TRANSACTIONS
+   Base: /api/super-admin/labs/:labId/transactions
+===================================================== */
 
 router.use(auth, role('super_admin'));
 
-// /* Issue items */
-// router.post('/issue/:transaction_id', issueTransaction);
+/* ============================
+   GET ALL TRANSACTIONS
+   GET /labs/:labId/transactions
+============================ */
+router.get('/', getTransactionHistory);
 
-// /* Return items */
-// router.post('/return/:transaction_id', returnTransaction);
+/* ============================
+   SEARCH TRANSACTIONS
+   GET /labs/:labId/transactions/search
+============================ */
+router.get('/search', searchTransactions);
 
-/* View transactions */
-router.get('/pending', getPendingTransactions);
-router.get('/active', getActiveTransactions);
-
-/* Available assets */
-router.get('/assets/:itemId/available', getAvailableAssetsByItem);
+/* ============================
+   GET OVERDUE TRANSACTIONS
+   GET /labs/:labId/transactions/overdue
+============================ */
+router.get('/overdue', getOverdueTransactions);
 
 module.exports = router;

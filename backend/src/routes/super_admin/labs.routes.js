@@ -10,15 +10,28 @@ const {
   removeLab
 } = require('../../controllers/super_admin.controller');
 
+/* =====================================================
+   SUPER ADMIN – LAB MANAGEMENT
+===================================================== */
+
 router.use(auth, role('super_admin'));
 
-/* Create lab */
+/* ============================
+   CREATE NEW LAB
+   POST /api/super-admin/labs
+============================ */
 router.post('/', createLab);
 
-/* View all labs with stats */
+/* ============================
+   GET ALL LABS WITH STATS
+   GET /api/super-admin/labs
+============================ */
 router.get('/', getAllLabs);
 
-/* Deactivate lab */
+/* ============================
+   DEACTIVATE LAB (SAFE DELETE)
+   DELETE /api/super-admin/labs/:labId
+============================ */
 router.delete('/:labId', removeLab);
 
 module.exports = router;

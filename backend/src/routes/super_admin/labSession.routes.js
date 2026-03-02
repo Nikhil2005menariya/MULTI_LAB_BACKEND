@@ -5,24 +5,34 @@ const auth = require('../../middlewares/auth.middleware');
 const role = require('../../middlewares/role.middleware');
 
 const {
-  issueLabSession,
-  getAvailableLabItems,
-  searchLabItems,
-  getActiveLabSessions
+  getLabSessions,
+  getLabSessionDetail,
+  getLabAvailableItems
 } = require('../../controllers/super_admin.controller');
+
+/* =====================================================
+   SUPER ADMIN – LAB SESSION ROUTES
+   Base: /api/super-admin/labs/:labId/lab-sessions
+===================================================== */
 
 router.use(auth, role('super_admin'));
 
-/* Available items */
-router.get('/items/available', getAvailableLabItems);
+/* ============================
+   GET ALL LAB SESSIONS
+   GET /labs/:labId/lab-sessions
+============================ */
+router.get('/', getLabSessions);
 
-/* Search items */
-router.get('/items/search', searchLabItems);
+/* ============================
+   GET SINGLE LAB SESSION
+   GET /labs/:labId/lab-sessions/:id
+============================ */
+router.get('/:id', getLabSessionDetail);
 
-/* Issue lab session */
-// router.post('/issue', issueLabSession);
-
-/* Active sessions */
-router.get('/active', getActiveLabSessions);
+/* ============================
+   GET AVAILABLE ITEMS FOR LAB
+   GET /labs/:labId/items/available
+============================ */
+router.get('/items/available', getLabAvailableItems);
 
 module.exports = router;

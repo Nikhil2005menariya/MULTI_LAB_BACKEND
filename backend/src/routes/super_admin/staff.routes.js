@@ -12,21 +12,41 @@ const {
   getCurrentIncharge
 } = require('../../controllers/super_admin.controller');
 
+/* =====================================================
+   SUPER ADMIN – LAB STAFF MANAGEMENT
+   Mounted at: /api/super-admin/labs/:labId
+===================================================== */
+
 router.use(auth, role('super_admin'));
 
-/* Get lab staff */
-router.get('/:labId/staff', getLabStaff);
+/* ============================
+   GET ALL STAFF
+   GET /labs/:labId/staff
+============================ */
+router.get('/staff', getLabStaff);
 
-/* Add assistant */
-router.post('/:labId/assistants', addAssistant);
+/* ============================
+   GET CURRENT INCHARGE
+   GET /labs/:labId/incharge
+============================ */
+router.get('/incharge', getCurrentIncharge);
 
-/* Remove assistant */
-router.delete('/:labId/assistants/:staffId', removeAssistant);
+/* ============================
+   ADD ASSISTANT
+   POST /labs/:labId/assistants
+============================ */
+router.post('/assistants', addAssistant);
 
-/* Change incharge (only one allowed) */
-router.post('/:labId/incharge', changeIncharge);
+/* ============================
+   REMOVE ASSISTANT
+   DELETE /labs/:labId/assistants/:staffId
+============================ */
+router.delete('/assistants/:staffId', removeAssistant);
 
-/*get current incharge*/
-router.get('/:labId/incharge', getCurrentIncharge);
+/* ============================
+   CHANGE INCHARGE
+   POST /labs/:labId/incharge
+============================ */
+router.post('/incharge', changeIncharge);
 
 module.exports = router;
