@@ -17,9 +17,18 @@ router.use(auth, role('incharge'));
 ===================================================== */
 router.get('/history', async (req, res) => {
   try {
+    const labId = req.user.lab_id;
+    if (!labId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Lab access denied'
+      });
+    }
+
     const { item, vendor, status, from, to } = req.query;
 
     const match = {};
+
     if (status) match.status = status;
 
     if (from || to) {
@@ -31,18 +40,21 @@ router.get('/history', async (req, res) => {
     const logs = await DamagedAssetLog.find(match)
       .populate({
         path: 'asset_id',
+        match: {
+          lab_id: labId, // 🔒 Lab Isolation
+          ...(vendor && { vendor: new RegExp(vendor, 'i') })
+        },
         populate: {
           path: 'item_id',
           match: {
-            ...(item && { name: new RegExp(item, 'i') }),
-            ...(vendor && { vendor: new RegExp(vendor, 'i') })
+            ...(item && { name: new RegExp(item, 'i') })
           }
         }
       })
       .sort({ reported_at: -1 })
       .lean();
 
-    // Remove null joins (when item/vendor filter doesn't match)
+    // Remove null joins
     const data = logs
       .filter(l => l.asset_id && l.asset_id.item_id)
       .map(l => ({
@@ -53,10 +65,12 @@ router.get('/history', async (req, res) => {
         asset_status: l.asset_id.status,
         asset_condition: l.asset_id.condition,
 
+        /* 🔥 CORRECT VENDOR SOURCE */
+        vendor: l.asset_id.vendor,
+
         item_name: l.asset_id.item_id.name,
         sku: l.asset_id.item_id.sku,
         category: l.asset_id.item_id.category,
-        vendor: l.asset_id.item_id.vendor,
 
         damage_status: l.status,
         damage_reason: l.damage_reason,
@@ -74,6 +88,7 @@ router.get('/history', async (req, res) => {
       count: data.length,
       data
     });
+
   } catch (error) {
     console.error('Error fetching damaged asset history:', error);
     res.status(500).json({
