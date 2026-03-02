@@ -23,13 +23,13 @@ const s3 = require('../utils/s3');
    ADD ITEM (FINAL – WITH RESERVED SUPPORT)
 ============================ */
 /* ============================
-   ADD ITEM (FINAL – LAB VISIBILITY FIXED)
+   ADD ITEM (FINAL ENTERPRISE)
 ============================ */
 exports.addItem = async (req, res) => {
   try {
     const labId = req.user.lab_id;
 
-    const {
+    let {
       name,
       sku,
       category,
@@ -39,8 +39,7 @@ exports.addItem = async (req, res) => {
       reserved_quantity = 0,
       vendor,
       invoice_number,
-      asset_prefix,
-      is_student_visible = true   // 🔥 NOW LAB-SCOPED
+      is_student_visible = true
     } = req.body;
 
     if (!labId) {
@@ -50,6 +49,33 @@ exports.addItem = async (req, res) => {
     if (!vendor) {
       return res.status(400).json({ error: 'Vendor is required' });
     }
+
+    /* ============================
+       VALIDATE + NORMALIZE NAME
+    ============================ */
+
+    if (!/^[a-zA-Z0-9\s-]+$/.test(name)) {
+      return res.status(400).json({
+        error: 'Name can only contain letters, numbers, spaces or hyphens'
+      });
+    }
+
+    name = name
+      .toLowerCase()
+      .replace(/[\s-]+/g, '_')
+      .trim();
+
+    /* ============================
+       VALIDATE + NORMALIZE SKU
+    ============================ */
+
+    if (!/^[a-zA-Z0-9]+$/.test(sku)) {
+      return res.status(400).json({
+        error: 'SKU must contain only letters and numbers (no special characters)'
+      });
+    }
+
+    sku = sku.toUpperCase().trim();
 
     const qty = Number(initial_quantity);
     const reservedQty = Number(reserved_quantity);
@@ -66,6 +92,10 @@ exports.addItem = async (req, res) => {
       });
     }
 
+    /* ============================
+       FIND OR CREATE GLOBAL ITEM
+    ============================ */
+
     let item = await Item.findOne({ sku });
 
     if (!item) {
@@ -80,28 +110,69 @@ exports.addItem = async (req, res) => {
       });
     }
 
-    const LabInventory = require('../models/LabInventory');
+    /* ============================
+       CREATE OR UPDATE LAB INVENTORY
+    ============================ */
 
-    const inventory = await LabInventory.create({
+    let inventory = await LabInventory.findOne({
       lab_id: labId,
-      item_id: item._id,
-      total_quantity: qty,
-      reserved_quantity: reservedQty,
-      available_quantity: qty - reservedQty,
-      is_student_visible: typeof is_student_visible === 'boolean'
-        ? is_student_visible
-        : true
+      item_id: item._id
     });
+
+    if (inventory) {
+      inventory.total_quantity += qty;
+      inventory.reserved_quantity += reservedQty;
+      inventory.available_quantity =
+        inventory.total_quantity - inventory.reserved_quantity;
+
+      if (typeof is_student_visible === 'boolean') {
+        inventory.is_student_visible = is_student_visible;
+      }
+
+      await inventory.save();
+    } else {
+      inventory = await LabInventory.create({
+        lab_id: labId,
+        item_id: item._id,
+        total_quantity: qty,
+        reserved_quantity: reservedQty,
+        available_quantity: qty - reservedQty,
+        is_student_visible
+      });
+    }
+
+    /* ============================
+       ASSET GENERATION (PER LAB)
+       FORMAT: LABCODE-SKU-0001
+    ============================ */
 
     const createdAssets = [];
 
     if (tracking_type === 'asset') {
 
-      const prefix = asset_prefix || sku;
+      const lab = await Lab.findById(labId).lean();
+      const labCode = lab.code; // IOT, EMB, etc
+
+      const lastAsset = await ItemAsset.findOne({
+        item_id: item._id,
+        lab_id: labId
+      })
+        .sort({ asset_tag: -1 })
+        .lean();
+
+      let lastSeq = 0;
+
+      if (lastAsset?.asset_tag) {
+        const match = lastAsset.asset_tag.match(/(\d+)$/);
+        lastSeq = match ? parseInt(match[1]) : 0;
+      }
 
       for (let i = 1; i <= qty; i++) {
 
-        const assetTag = `${prefix}-${String(i).padStart(4, '0')}`;
+        const newSeq = lastSeq + i;
+
+        const assetTag =
+          `${labCode}-${sku}-${String(newSeq).padStart(4, '0')}`;
 
         const asset = await ItemAsset.create({
           lab_id: labId,
@@ -135,7 +206,7 @@ exports.addItem = async (req, res) => {
 
 
 /* ============================
-   UPDATE ITEM (FINAL – LAB VISIBILITY FIXED)
+   UPDATE ITEM (FINAL ENTERPRISE)
 ============================ */
 exports.updateItem = async (req, res) => {
   try {
@@ -160,15 +231,12 @@ exports.updateItem = async (req, res) => {
     }
 
     const addQty = Number(req.body.add_quantity || 0);
-    const removeAssetTags = req.body.remove_asset_tags || [];
     const newReserved =
       req.body.reserved_quantity !== undefined
         ? Number(req.body.reserved_quantity)
         : undefined;
 
     const createdAssets = [];
-
-    const LabInventory = require('../models/LabInventory');
 
     const inventory = await LabInventory.findOne({
       lab_id: labId,
@@ -181,11 +249,8 @@ exports.updateItem = async (req, res) => {
       });
     }
 
-    /* ==================================================
-       ADD STOCK / REMOVE STOCK LOGIC (UNCHANGED)
-    ================================================== */
-
     if (addQty > 0) {
+
       if (!req.body.vendor) {
         return res.status(400).json({
           error: 'Vendor is required when adding new stock'
@@ -197,12 +262,30 @@ exports.updateItem = async (req, res) => {
       }
 
       if (item.tracking_type === 'asset') {
-        for (let i = 0; i < addQty; i++) {
-          item.last_asset_seq = (item.last_asset_seq || 0) + 1;
 
-          const assetTag = `${item.sku}-${String(
-            item.last_asset_seq
-          ).padStart(4, '0')}`;
+        const lab = await Lab.findById(labId).lean();
+        const labCode = lab.code;
+
+        const lastAsset = await ItemAsset.findOne({
+          item_id: item._id,
+          lab_id: labId
+        })
+          .sort({ asset_tag: -1 })
+          .lean();
+
+        let lastSeq = 0;
+
+        if (lastAsset?.asset_tag) {
+          const match = lastAsset.asset_tag.match(/(\d+)$/);
+          lastSeq = match ? parseInt(match[1]) : 0;
+        }
+
+        for (let i = 1; i <= addQty; i++) {
+
+          const newSeq = lastSeq + i;
+
+          const assetTag =
+            `${labCode}-${item.sku}-${String(newSeq).padStart(4, '0')}`;
 
           const asset = await ItemAsset.create({
             lab_id: labId,
@@ -236,57 +319,23 @@ exports.updateItem = async (req, res) => {
       inventory.total_quantity -= removeQty;
     }
 
-    /* ==================================================
-       UPDATE RESERVED
-    ================================================== */
-
     if (newReserved !== undefined) {
       if (newReserved < 0 || newReserved > inventory.total_quantity) {
         return res.status(400).json({
           error: 'Reserved quantity must be between 0 and total quantity'
         });
       }
-
       inventory.reserved_quantity = newReserved;
     }
-
-    /* ==================================================
-       🔥 UPDATE LAB-SCOPED VISIBILITY
-    ================================================== */
 
     if (typeof req.body.is_student_visible === 'boolean') {
       inventory.is_student_visible = req.body.is_student_visible;
     }
 
-    /* ==================================================
-       RECALCULATE AVAILABLE
-    ================================================== */
-
     inventory.available_quantity =
       inventory.total_quantity - inventory.reserved_quantity;
 
-    if (inventory.available_quantity < 0) {
-      return res.status(400).json({
-        error: 'Reserved quantity exceeds total stock'
-      });
-    }
-
     await inventory.save();
-
-    /* ==================================================
-       SAFE ITEM FIELD UPDATES (NO VISIBILITY HERE)
-    ================================================== */
-
-    if (req.body.name !== undefined)
-      item.name = req.body.name;
-
-    if (req.body.category !== undefined)
-      item.category = req.body.category;
-
-    if (req.body.description !== undefined)
-      item.description = req.body.description;
-
-    await item.save();
 
     return res.json({
       success: true,
@@ -525,6 +574,60 @@ exports.getAllItems = async (req, res) => {
     console.error('GET ALL ITEMS ERROR:', err);
     return res.status(500).json({
       error: 'Failed to fetch items'
+    });
+  }
+};
+
+
+/* ============================
+   SEARCH ITEMS BY PREFIX
+   Used for Auto-Suggest
+============================ */
+/* ============================
+   SEARCH ITEMS BY PREFIX
+============================ */
+exports.searchItemsByPrefix = async (req, res) => {
+  try {
+    let { q } = req.query;
+
+    if (!q || q.length < 2) {
+      return res.json({
+        success: true,
+        count: 0,
+        data: []
+      });
+    }
+
+    const normalizedName = q
+      .toLowerCase()
+      .replace(/[\s-]+/g, '_')
+      .trim();
+
+    const normalizedSku = q
+      .toUpperCase()
+      .trim();
+
+    const items = await Item.find({
+      $or: [
+        { name: { $regex: new RegExp(`^${normalizedName}`) } },
+        { sku: { $regex: new RegExp(`^${normalizedSku}`) } }
+      ],
+      is_active: true
+    })
+      .select('name sku category description tracking_type')
+      .limit(10)
+      .lean();
+
+    return res.json({
+      success: true,
+      count: items.length,
+      data: items
+    });
+
+  } catch (err) {
+    console.error('SEARCH ITEMS ERROR:', err);
+    return res.status(500).json({
+      error: 'Failed to fetch item'
     });
   }
 };
