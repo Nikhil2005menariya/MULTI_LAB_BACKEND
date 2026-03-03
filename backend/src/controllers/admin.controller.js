@@ -50,10 +50,6 @@ exports.addItem = async (req, res) => {
       return res.status(400).json({ error: 'Vendor is required' });
     }
 
-    /* ============================
-       VALIDATE + NORMALIZE NAME
-    ============================ */
-
     if (!/^[a-zA-Z0-9\s-]+$/.test(name)) {
       return res.status(400).json({
         error: 'Name can only contain letters, numbers, spaces or hyphens'
@@ -64,10 +60,6 @@ exports.addItem = async (req, res) => {
       .toLowerCase()
       .replace(/[\s-]+/g, '_')
       .trim();
-
-    /* ============================
-       VALIDATE + NORMALIZE SKU
-    ============================ */
 
     if (!/^[a-zA-Z0-9]+$/.test(sku)) {
       return res.status(400).json({
@@ -92,10 +84,6 @@ exports.addItem = async (req, res) => {
       });
     }
 
-    /* ============================
-       FIND OR CREATE GLOBAL ITEM
-    ============================ */
-
     let item = await Item.findOne({ sku });
 
     if (!item) {
@@ -110,40 +98,41 @@ exports.addItem = async (req, res) => {
       });
     }
 
-    /* ============================
-       CREATE OR UPDATE LAB INVENTORY
-    ============================ */
-
     let inventory = await LabInventory.findOne({
       lab_id: labId,
       item_id: item._id
     });
 
     if (inventory) {
+
       inventory.total_quantity += qty;
       inventory.reserved_quantity += reservedQty;
-      inventory.available_quantity =
-        inventory.total_quantity - inventory.reserved_quantity;
+
+      // 🔥 FIXED BULK LOGIC (no recompute)
+      if (tracking_type === 'bulk') {
+        inventory.available_quantity += (qty - reservedQty);
+      }
 
       if (typeof is_student_visible === 'boolean') {
         inventory.is_student_visible = is_student_visible;
       }
 
       await inventory.save();
+
     } else {
+
       inventory = await LabInventory.create({
         lab_id: labId,
         item_id: item._id,
         total_quantity: qty,
         reserved_quantity: reservedQty,
-        available_quantity: qty - reservedQty,
+        available_quantity: qty, // correct initial value
         is_student_visible
       });
     }
 
     /* ============================
-       ASSET GENERATION (PER LAB)
-       FORMAT: LABCODE-SKU-0001
+       ASSET GENERATION (UNCHANGED)
     ============================ */
 
     const createdAssets = [];
@@ -151,7 +140,7 @@ exports.addItem = async (req, res) => {
     if (tracking_type === 'asset') {
 
       const lab = await Lab.findById(labId).lean();
-      const labCode = lab.code; // IOT, EMB, etc
+      const labCode = lab.code;
 
       const lastAsset = await ItemAsset.findOne({
         item_id: item._id,
@@ -249,19 +238,23 @@ exports.updateItem = async (req, res) => {
       });
     }
 
+    /* ================= ADD STOCK ================= */
+
     if (addQty > 0) {
 
-      if (!req.body.vendor) {
-        return res.status(400).json({
-          error: 'Vendor is required when adding new stock'
-        });
-      }
-
       if (item.tracking_type === 'bulk') {
+
         inventory.total_quantity += addQty;
+        inventory.available_quantity += addQty;
       }
 
       if (item.tracking_type === 'asset') {
+
+        if (!req.body.vendor) {
+          return res.status(400).json({
+            error: 'Vendor is required when adding new stock'
+          });
+        }
 
         const lab = await Lab.findById(labId).lean();
         const labCode = lab.code;
@@ -304,36 +297,70 @@ exports.updateItem = async (req, res) => {
       }
     }
 
+    /* ================= REMOVE STOCK (BULK ONLY) ================= */
+
     if (addQty < 0 && item.tracking_type === 'bulk') {
+
       const removeQty = Math.abs(addQty);
 
-      const effectiveAvailable =
-        inventory.total_quantity - inventory.reserved_quantity;
-
-      if (removeQty > effectiveAvailable) {
+      if (removeQty > inventory.available_quantity) {
         return res.status(400).json({
-          error: 'Cannot remove reserved stock'
+          error: 'Cannot remove reserved or issued stock'
         });
       }
 
       inventory.total_quantity -= removeQty;
+      inventory.available_quantity -= removeQty;
     }
 
+    /* ================= UPDATE RESERVED ================= */
+
     if (newReserved !== undefined) {
+
       if (newReserved < 0 || newReserved > inventory.total_quantity) {
         return res.status(400).json({
           error: 'Reserved quantity must be between 0 and total quantity'
         });
       }
+
+      const diff = newReserved - inventory.reserved_quantity;
+
+      if (item.tracking_type === 'bulk') {
+
+        if (diff > 0) {
+          if (diff > inventory.available_quantity) {
+            return res.status(400).json({
+              error: 'Not enough available stock to reserve'
+            });
+          }
+          inventory.available_quantity -= diff;
+        }
+
+        if (diff < 0) {
+          inventory.available_quantity += Math.abs(diff);
+        }
+      }
+
       inventory.reserved_quantity = newReserved;
+    }
+
+    /* ================= 🔥 ASSET RE-CALCULATION ================= */
+
+    if (item.tracking_type === 'asset') {
+
+      const actualAvailable = await ItemAsset.countDocuments({
+        lab_id: labId,
+        item_id: item._id,
+        status: 'available',
+        condition: 'good'
+      });
+
+      inventory.available_quantity = actualAvailable;
     }
 
     if (typeof req.body.is_student_visible === 'boolean') {
       inventory.is_student_visible = req.body.is_student_visible;
     }
-
-    inventory.available_quantity =
-      inventory.total_quantity - inventory.reserved_quantity;
 
     await inventory.save();
 
@@ -351,6 +378,7 @@ exports.updateItem = async (req, res) => {
     });
   }
 };
+
 /* ============================
    GET ITEM ASSETS (LAB SAFE)
 ============================ */
@@ -579,10 +607,6 @@ exports.getAllItems = async (req, res) => {
 };
 
 
-/* ============================
-   SEARCH ITEMS BY PREFIX
-   Used for Auto-Suggest
-============================ */
 /* ============================
    SEARCH ITEMS BY PREFIX
 ============================ */

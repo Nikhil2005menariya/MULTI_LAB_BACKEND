@@ -159,7 +159,9 @@ const transactionSchema = new mongoose.Schema(
         'return_requested', // temporary only
         'completed',        // fully done
         'overdue',
-        'rejected'
+        'rejected',
+        'partial_returned',
+        'partial_issued',
       ],
       default: 'raised',
       index: true

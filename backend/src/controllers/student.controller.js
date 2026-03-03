@@ -12,12 +12,6 @@ const { sendMail } = require('../services/mail.service');
 /* ============================
    GET ALL ITEMS (STUDENT SAFE)
 ============================ */
-/* ============================
-   GET ALL ITEMS (STUDENT SAFE – FINAL STRICT VERSION)
-============================ */
-/* ============================
-   GET ALL ITEMS (STUDENT SAFE)
-============================ */
 exports.getAllItems = async (req, res) => {
   try {
 
@@ -97,12 +91,7 @@ exports.getAllItems = async (req, res) => {
 /* ============================
    GET ITEM LABS
 ============================ */
-/* ============================
-   GET ITEM LABS (LAB VISIBILITY FIXED)
-============================ */
-/* ============================
-   GET ITEM LABS
-============================ */
+
 exports.getItemLabs = async (req, res) => {
   try {
     const { item_id } = req.params;
@@ -112,17 +101,16 @@ exports.getItemLabs = async (req, res) => {
       {
         $match: {
           item_id: new mongoose.Types.ObjectId(item_id),
-          is_student_visible: true   // 🔥 FIXED HERE
+          is_student_visible: true
         }
       },
-
       {
         $addFields: {
           available_quantity: {
             $subtract: [
               {
                 $subtract: [
-                  '$total_quantity',
+                  '$available_quantity',
                   { $ifNull: ['$reserved_quantity', 0] }
                 ]
               },
@@ -131,7 +119,6 @@ exports.getItemLabs = async (req, res) => {
           }
         }
       },
-
       {
         $match: {
           available_quantity: { $gt: 0 }
@@ -213,7 +200,7 @@ exports.raiseTransaction = async (req, res) => {
 
     const existingTxn = await Transaction.findOne({
       student_id: student._id,
-      status: { $in: ['raised','approved','active','overdue'] }
+      status: { $in: ['raised','approved','active','overdue','partial_issued','partial_returned'] }
     });
 
     if (existingTxn) {

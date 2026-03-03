@@ -13,20 +13,32 @@ exports.issueTransaction = async (req, res) => {
     const { transaction_id } = req.params;
     const assistantLabId = req.user.lab_id;
 
+    if (!assistantLabId) {
+      throw new Error('Unauthorized lab access');
+    }
+
     const transaction = await Transaction.findOne({
       transaction_id,
-      status: 'approved'
+      status: { $in: ['approved', 'partial_issued', 'active'] }
     }).session(session);
 
     if (!transaction) {
-      throw new Error('Transaction not found or not approved');
+      throw new Error('Transaction not found or not allowed');
     }
+
+    let processedAnyItem = false;
 
     for (const txnItem of transaction.items) {
 
       if (txnItem.lab_id.toString() !== assistantLabId.toString()) {
-        throw new Error('Unauthorized lab access');
+        continue;
       }
+
+      if (txnItem.issued_quantity >= txnItem.quantity) {
+        continue;
+      }
+
+      processedAnyItem = true;
 
       const inventory = await LabInventory.findOne({
         lab_id: assistantLabId,
@@ -37,49 +49,55 @@ exports.issueTransaction = async (req, res) => {
         throw new Error('Inventory record not found');
       }
 
-      /* ================= BULK ================= */
-      if (txnItem.quantity > 0) {
+      const remainingQty =
+        txnItem.quantity - txnItem.issued_quantity;
 
-        if (inventory.temp_reserved_quantity < txnItem.quantity) {
+      const item = await Item.findById(txnItem.item_id).session(session);
+
+      /* ================= BULK ================= */
+      if (item.tracking_type === 'bulk') {
+
+        if (inventory.temp_reserved_quantity < remainingQty) {
           throw new Error('Invalid reservation state');
         }
 
-        inventory.temp_reserved_quantity -= txnItem.quantity;
-        inventory.available_quantity -= txnItem.quantity;
+        inventory.temp_reserved_quantity -= remainingQty;
+        inventory.available_quantity -= remainingQty;
 
-        txnItem.issued_quantity = txnItem.quantity;
+        txnItem.issued_quantity += remainingQty;
 
         await inventory.save({ session });
       }
 
       /* ================= ASSET ================= */
-      if (txnItem.quantity > 0) {
+      if (item.tracking_type === 'asset') {
 
         const itemAssets = await ItemAsset.find({
           lab_id: assistantLabId,
           item_id: txnItem.item_id,
           status: 'available'
         })
-          .limit(txnItem.quantity)
+          .limit(remainingQty)
           .session(session);
 
-        if (itemAssets.length !== txnItem.quantity) {
+        if (itemAssets.length !== remainingQty) {
           throw new Error('Not enough available assets');
         }
 
-        txnItem.asset_ids = itemAssets.map(a => a._id);
-        txnItem.issued_quantity = itemAssets.length;
+        txnItem.asset_ids = txnItem.asset_ids || [];
 
         for (const asset of itemAssets) {
           asset.status = 'issued';
           asset.last_transaction_id = transaction._id;
           await asset.save({ session });
+
+          txnItem.asset_ids.push(asset._id);
         }
 
-        // 🔥 Clear temp reservation
+        txnItem.issued_quantity += itemAssets.length;
+
         inventory.temp_reserved_quantity -= itemAssets.length;
 
-        // 🔥 RE-CALCULATE AVAILABLE FROM SOURCE OF TRUTH
         const actualAvailable = await ItemAsset.countDocuments({
           lab_id: assistantLabId,
           item_id: txnItem.item_id,
@@ -92,9 +110,28 @@ exports.issueTransaction = async (req, res) => {
       }
     }
 
-    transaction.status = 'active';
+    if (!processedAnyItem) {
+      throw new Error('No items available to issue for this lab');
+    }
+
+    /* ================= STATUS MANAGEMENT ================= */
+
+    const allIssued = transaction.items.every(
+      item => item.issued_quantity === item.quantity
+    );
+
+    const anyIssued = transaction.items.some(
+      item => item.issued_quantity > 0
+    );
+
+    if (allIssued) {
+      transaction.status = 'active';
+      transaction.issued_at = new Date();
+    } else if (anyIssued) {
+      transaction.status = 'partial_issued';
+    }
+
     transaction.issued_by_incharge_id = req.user.id;
-    transaction.issued_at = new Date();
 
     await transaction.save({ session });
 
@@ -103,16 +140,20 @@ exports.issueTransaction = async (req, res) => {
 
     return res.json({
       success: true,
-      message: 'Items issued successfully'
+      message: allIssued
+        ? 'All items issued successfully'
+        : 'Items issued for your lab successfully'
     });
 
   } catch (err) {
     await session.abortTransaction();
     session.endSession();
-    return res.status(400).json({ error: err.message });
+
+    return res.status(400).json({
+      error: err.message
+    });
   }
 };
-
 
 exports.returnTransaction = async (req, res) => {
   const session = await mongoose.startSession();
@@ -122,28 +163,38 @@ exports.returnTransaction = async (req, res) => {
     const assistantLabId = req.user.lab_id;
     const { items } = req.body;
 
+    if (!assistantLabId) {
+      throw new Error('Unauthorized lab access');
+    }
+
     if (!Array.isArray(items) || items.length === 0) {
       throw new Error('No return items provided');
     }
 
     const transaction = await Transaction.findOne({
       transaction_id: req.params.transaction_id,
-      status: 'active'
+      status: { $in: ['active', 'partial_returned'] }
     }).session(session);
 
     if (!transaction) {
       throw new Error('Active transaction not found');
     }
 
+    let processedAnyItem = false;
+
     for (const returnItem of items) {
 
+      if (!returnItem.item_id || !returnItem.lab_id) {
+        throw new Error('item_id and lab_id are required');
+      }
+
       const txnItem = transaction.items.find(
-        t => String(t.item_id) === String(returnItem.item_id)
+        t =>
+          String(t.item_id) === String(returnItem.item_id) &&
+          String(t.lab_id) === String(returnItem.lab_id)
       );
 
-      if (!txnItem) {
-        throw new Error('Item not part of transaction');
-      }
+      if (!txnItem) continue;
 
       if (String(txnItem.lab_id) !== String(assistantLabId)) {
         throw new Error('Unauthorized lab access');
@@ -158,68 +209,108 @@ exports.returnTransaction = async (req, res) => {
         throw new Error('Inventory record missing');
       }
 
+      const item = await Item.findById(txnItem.item_id).session(session);
+
       /* ================= BULK ================= */
-      if (txnItem.quantity > 0) {
+      if (item.tracking_type === 'bulk') {
 
         const qty = Number(returnItem.returned_quantity);
 
-        if (!qty || qty <= 0 || qty > txnItem.issued_quantity) {
+        const remainingReturnable =
+          txnItem.issued_quantity - txnItem.returned_quantity;
+
+        if (!qty || qty <= 0 || qty > remainingReturnable) {
           throw new Error('Invalid bulk return quantity');
         }
 
         inventory.available_quantity += qty;
-        txnItem.returned_quantity = qty;
+        txnItem.returned_quantity += qty;
 
         await inventory.save({ session });
       }
 
       /* ================= ASSET ================= */
-      if (txnItem.asset_ids && txnItem.asset_ids.length > 0) {
+      if (item.tracking_type === 'asset') {
 
+        const returnedIds = returnItem.returned_asset_ids || [];
         const damagedIds = returnItem.damaged_asset_ids || [];
 
-        // Validate damaged ⊆ issued
-        for (const id of damagedIds) {
-          if (!txnItem.asset_ids.map(a => a.toString()).includes(id)) {
-            throw new Error('Damaged asset not part of issued assets');
+        const allIds = [...returnedIds, ...damagedIds];
+
+        if (allIds.length === 0) {
+          throw new Error('No asset IDs provided for return');
+        }
+
+        const validIssuedIds = txnItem.asset_ids.map(a => a.toString());
+
+        for (const id of allIds) {
+          if (!validIssuedIds.includes(id)) {
+            throw new Error('Asset not part of issued assets');
           }
         }
 
-        for (const assetId of txnItem.asset_ids) {
+        const remainingReturnable =
+          txnItem.issued_quantity - txnItem.returned_quantity;
 
-          const asset = await ItemAsset.findById(assetId).session(session);
-          if (!asset) continue;
+        if (allIds.length > remainingReturnable) {
+          throw new Error('Returning more assets than issued');
+        }
 
-          if (damagedIds.includes(assetId.toString())) {
+        for (const assetId of returnedIds) {
 
-            asset.status = 'damaged';
-            asset.condition = 'broken';
+          const asset = await ItemAsset.findOne({
+            _id: assetId,
+            lab_id: assistantLabId,
+            status: 'issued'
+          }).session(session);
 
-            inventory.damaged_quantity += 1;
-
-            await DamagedAssetLog.create([{
-              asset_id: asset._id,
-              transaction_id: transaction._id,
-              student_id: transaction.student_id || null,
-              faculty_id: transaction.faculty_id || null,
-              faculty_email: transaction.faculty_email || null,
-              damage_reason: returnItem.damage_reason || 'Reported damaged',
-              remarks: returnItem.remarks || ''
-            }], { session });
-
-          } else {
-
-            asset.status = 'available';
-            asset.condition = 'good';
+          if (!asset) {
+            throw new Error('Asset already returned or invalid');
           }
 
+          asset.status = 'available';
+          asset.condition = 'good';
           asset.last_transaction_id = transaction._id;
+
           await asset.save({ session });
+
+          txnItem.returned_quantity += 1;
         }
 
-        txnItem.returned_quantity = txnItem.asset_ids.length;
+        for (const assetId of damagedIds) {
 
-        /* 🔥 RE-CALCULATE AVAILABLE FROM SOURCE OF TRUTH */
+          const asset = await ItemAsset.findOne({
+            _id: assetId,
+            lab_id: assistantLabId,
+            status: 'issued'
+          }).session(session);
+
+          if (!asset) {
+            throw new Error('Asset already returned or invalid');
+          }
+
+          asset.status = 'damaged';
+          asset.condition = 'broken';
+          asset.last_transaction_id = transaction._id;
+
+          await asset.save({ session });
+
+          inventory.damaged_quantity += 1;
+
+          await DamagedAssetLog.create([{
+            asset_id: asset._id,
+            transaction_id: transaction._id,
+            student_id: transaction.student_id || null,
+            faculty_id: transaction.faculty_id || null,
+            faculty_email: transaction.faculty_email || null,
+            damage_reason: returnItem.damage_reason || 'Reported damaged',
+            remarks: returnItem.remarks || ''
+          }], { session });
+
+          txnItem.returned_quantity += 1;
+        }
+
+        // 🔥 ALWAYS RECALCULATE AVAILABLE FROM DB
         const actualAvailable = await ItemAsset.countDocuments({
           lab_id: assistantLabId,
           item_id: txnItem.item_id,
@@ -230,10 +321,30 @@ exports.returnTransaction = async (req, res) => {
 
         await inventory.save({ session });
       }
+
+      processedAnyItem = true;
     }
 
-    transaction.status = 'completed';
-    transaction.actual_return_date = new Date();
+    if (!processedAnyItem) {
+      throw new Error('No returnable items for this lab');
+    }
+
+    /* ================= STATUS MANAGEMENT ================= */
+
+    const allReturned = transaction.items.every(
+      i => i.returned_quantity === i.issued_quantity
+    );
+
+    const anyReturned = transaction.items.some(
+      i => i.returned_quantity > 0
+    );
+
+    if (allReturned) {
+      transaction.status = 'completed';
+      transaction.actual_return_date = new Date();
+    } else if (anyReturned) {
+      transaction.status = 'partial_returned';
+    }
 
     await transaction.save({ session });
 
@@ -242,7 +353,9 @@ exports.returnTransaction = async (req, res) => {
 
     return res.json({
       success: true,
-      message: 'Transaction completed successfully'
+      message: allReturned
+        ? 'Transaction completed successfully'
+        : 'Items returned for your lab successfully'
     });
 
   } catch (err) {
@@ -257,10 +370,10 @@ exports.returnTransaction = async (req, res) => {
   }
 };
 
-
 /* ============================
    GET ACTIVE TRANSACTIONS
 ============================ */
+
 exports.getActiveTransactions = async (req, res) => {
   try {
     const labId = req.user.lab_id;
@@ -272,7 +385,7 @@ exports.getActiveTransactions = async (req, res) => {
     }
 
     const transactions = await Transaction.find({
-      status: 'active',
+      status: { $in: ['active', 'partial_issued', 'partial_returned'] },
       'items.lab_id': labId
     })
       .populate('student_id', 'name reg_no email')
@@ -284,18 +397,32 @@ exports.getActiveTransactions = async (req, res) => {
       .sort({ issued_at: -1, createdAt: -1 })
       .lean();
 
-    /* ===============================
-       FORMAT ASSET TAGS FOR FRONTEND
-    =============================== */
-    const formatted = transactions.map(txn => ({
-      ...txn,
-      items: txn.items
-        .filter(i => i.lab_id.toString() === labId.toString()) // 🔒 strict lab isolation
-        .map(i => ({
-          ...i,
-          asset_tags: i.asset_ids?.map(a => a.asset_tag) || []
-        }))
-    }));
+    const formatted = transactions
+      .map(txn => {
+
+        // 🔥 Only items belonging to this lab
+        const labItems = txn.items.filter(
+          i => i.lab_id.toString() === labId.toString()
+        );
+
+        // 🔥 Only items where return is still pending
+        const activeItems = labItems
+          .filter(i => i.issued_quantity > i.returned_quantity)
+          .map(i => ({
+            ...i,
+            asset_tags: i.asset_ids?.map(a => a.asset_tag) || [],
+            remaining_return:
+              i.issued_quantity - i.returned_quantity
+          }));
+
+        if (activeItems.length === 0) return null;
+
+        return {
+          ...txn,
+          items: activeItems
+        };
+      })
+      .filter(Boolean);
 
     return res.json({
       success: true,
@@ -310,9 +437,8 @@ exports.getActiveTransactions = async (req, res) => {
     });
   }
 };
-
 /* ============================
-   GET PENDING TRANSACTIONS
+   GET PENDING TRANSACTIONS 
 ============================ */
 exports.getPendingTransactions = async (req, res) => {
   try {
@@ -325,8 +451,8 @@ exports.getPendingTransactions = async (req, res) => {
     }
 
     const transactions = await Transaction.find({
-      status: 'approved',
-      'items.lab_id': labId // 🔒 LAB ISOLATION
+      status: { $in: ['approved', 'partial_issued'] }, // 🔥 fixed
+      'items.lab_id': labId
     })
       .populate('student_id', 'name reg_no email')
       .populate('items.item_id', 'name sku tracking_type')
@@ -337,18 +463,28 @@ exports.getPendingTransactions = async (req, res) => {
       .sort({ createdAt: -1 })
       .lean();
 
-    /* ===============================
-       STRICT LAB FILTER + FORMAT
-    =============================== */
-    const formatted = transactions.map(txn => ({
-      ...txn,
-      items: txn.items
-        .filter(i => i.lab_id.toString() === labId.toString())
-        .map(i => ({
-          ...i,
-          asset_tags: i.asset_ids?.map(a => a.asset_tag) || []
-        }))
-    }));
+    const formatted = transactions
+      .map(txn => {
+
+        const filteredItems = txn.items
+          .filter(i =>
+            i.lab_id.toString() === labId.toString() &&
+            i.issued_quantity < i.quantity // 🔥 issue remaining
+          )
+          .map(i => ({
+            ...i,
+            asset_tags: i.asset_ids?.map(a => a.asset_tag) || [],
+            remaining_quantity: i.quantity - i.issued_quantity
+          }));
+
+        if (filteredItems.length === 0) return null;
+
+        return {
+          ...txn,
+          items: filteredItems
+        };
+      })
+      .filter(Boolean);
 
     return res.json({
       success: true,
@@ -572,7 +708,7 @@ exports.issueLabSession = async (req, res) => {
 
 
 /* ============================
-   GET AVAILABLE ITEMS (LAB)
+   GET AVAILABLE ITEMS 
 ============================ */
 exports.getAvailableLabItems = async (req, res) => {
   try {

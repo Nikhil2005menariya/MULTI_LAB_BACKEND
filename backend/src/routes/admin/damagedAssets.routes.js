@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const mongoose = require('mongoose');
 
 const auth = require('../../middlewares/auth.middleware');
 const role = require('../../middlewares/role.middleware');
@@ -7,6 +8,7 @@ const role = require('../../middlewares/role.middleware');
 const DamagedAssetLog = require('../../models/DamagedAssetLog');
 const ItemAsset = require('../../models/ItemAsset');
 const Item = require('../../models/Item');
+const LabInventory = require('../../models/LabInventory');
 
 // Admin only
 router.use(auth, role('incharge'));
@@ -104,22 +106,34 @@ router.get('/history', async (req, res) => {
 ===================================================== */
 router.get('/', async (req, res) => {
   try {
+    const labId = req.user.lab_id;
+    if (!labId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Lab access denied'
+      });
+    }
+
     const records = await DamagedAssetLog.find({
       status: { $in: ['damaged', 'under_repair'] }
     })
       .populate({
         path: 'asset_id',
+        match: { lab_id: labId }, // 🔒 LAB ISOLATION
         populate: { path: 'item_id' }
       })
       .populate('student_id', 'name reg_no email')
       .sort({ reported_at: -1 })
       .lean();
 
+    const filtered = records.filter(r => r.asset_id);
+
     res.json({
       success: true,
-      count: records.length,
-      data: records
+      count: filtered.length,
+      data: filtered
     });
+
   } catch (error) {
     console.error('Error fetching damaged assets:', error);
     res.status(500).json({
@@ -162,41 +176,49 @@ router.get('/under-repair/list', async (req, res) => {
    PATCH /api/admin/damaged-assets/:id/status
 ===================================================== */
 router.patch('/:id/status', async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
   try {
+    const labId = req.user.lab_id;
     const { action } = req.body;
 
+    if (!labId) {
+      throw new Error('Lab access denied');
+    }
+
     if (!['repair', 'resolve', 'retire'].includes(action)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid action'
-      });
+      throw new Error('Invalid action');
     }
 
-    const record = await DamagedAssetLog.findById(req.params.id);
+    const record = await DamagedAssetLog.findById(req.params.id).session(session);
     if (!record) {
-      return res.status(404).json({
-        success: false,
-        message: 'Damage record not found'
-      });
+      throw new Error('Damage record not found');
     }
 
-    const asset = await ItemAsset.findById(record.asset_id);
+    const asset = await ItemAsset.findById(record.asset_id).session(session);
     if (!asset) {
-      return res.status(404).json({
-        success: false,
-        message: 'Asset not found'
-      });
+      throw new Error('Asset not found');
     }
 
-    const item = await Item.findById(asset.item_id);
-    if (!item) {
-      return res.status(404).json({
-        success: false,
-        message: 'Parent item not found'
-      });
+    // 🔒 LAB ISOLATION
+    if (String(asset.lab_id) !== String(labId)) {
+      throw new Error('Unauthorized lab access');
     }
+
+    const inventory = await LabInventory.findOne({
+      lab_id: asset.lab_id,
+      item_id: asset.item_id
+    }).session(session);
+
+    if (!inventory) {
+      throw new Error('Lab inventory not found');
+    }
+
+    /* ================= ACTION HANDLING ================= */
 
     switch (action) {
+
       case 'repair':
         asset.status = 'damaged';
         asset.condition = 'faulty';
@@ -207,33 +229,57 @@ router.patch('/:id/status', async (req, res) => {
         asset.status = 'available';
         asset.condition = 'good';
         record.status = 'resolved';
-        item.available_quantity += 1;
-        item.damaged_quantity = Math.max(0, item.damaged_quantity - 1);
-        await item.save();
         break;
 
       case 'retire':
         asset.status = 'retired';
         asset.condition = 'broken';
         record.status = 'retired';
-        item.damaged_quantity = Math.max(0, item.damaged_quantity - 1);
-        item.total_quantity = Math.max(0, item.total_quantity - 1);
-        await item.save();
+
+        // 🔥 permanently reduce lab total
+        inventory.total_quantity = Math.max(0, inventory.total_quantity - 1);
         break;
     }
 
-    await asset.save();
-    await record.save();
+    await asset.save({ session });
+    await record.save({ session });
+
+    /* ================= RECALCULATE COUNTS ================= */
+
+    const availableCount = await ItemAsset.countDocuments({
+      lab_id: asset.lab_id,
+      item_id: asset.item_id,
+      status: 'available'
+    }).session(session);
+
+    const damagedCount = await ItemAsset.countDocuments({
+      lab_id: asset.lab_id,
+      item_id: asset.item_id,
+      status: 'damaged'
+    }).session(session);
+
+    inventory.available_quantity = availableCount;
+    inventory.damaged_quantity = damagedCount;
+
+    await inventory.save({ session });
+
+    await session.commitTransaction();
+    session.endSession();
 
     res.json({
       success: true,
       message: `Asset status updated via action: ${action}`
     });
+
   } catch (error) {
+    await session.abortTransaction();
+    session.endSession();
+
     console.error('Error updating damaged asset status:', error);
-    res.status(500).json({
+
+    res.status(400).json({
       success: false,
-      message: 'Failed to update asset status'
+      message: error.message
     });
   }
 });
