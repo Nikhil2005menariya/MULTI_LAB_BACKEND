@@ -4,6 +4,7 @@ const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const { sendMail } = require('../services/mail.service');
+const mongoose = require('mongoose');
 /* =====================================================
    ================= EMAIL TOKEN FLOW ==================
 ===================================================== */
@@ -84,21 +85,61 @@ exports.getApprovalDetails = async (req, res) => {
    REJECT VIA EMAIL TOKEN
 ============================ */
 exports.rejectTransaction = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
   try {
     const { token, reason } = req.body;
 
     if (!token) {
+      await session.abortTransaction();
       return res.status(400).json({ error: 'Approval token missing' });
     }
 
     const transaction = await Transaction.findOne({
       'faculty_approval.approval_token': token,
       status: 'raised'
-    });
+    }).session(session);
 
     if (!transaction) {
-      return res.status(400).json({ error: 'Invalid or expired approval token' });
+      await session.abortTransaction();
+      return res.status(400).json({
+        error: 'Invalid or expired approval token'
+      });
     }
+
+    /* ======================================
+       RELEASE TEMP RESERVED STOCK
+    ====================================== */
+
+    const LabInventory = require('../models/LabInventory');
+
+    for (const item of transaction.items) {
+
+      const inventory = await LabInventory.findOne({
+        lab_id: item.lab_id,
+        item_id: item.item_id
+      }).session(session);
+
+      if (!inventory) continue;
+
+      const reservedQty =
+        item.quantity ||
+        item.asset_ids?.length ||
+        0;
+
+      inventory.temp_reserved_quantity =
+        Math.max(
+          0,
+          inventory.temp_reserved_quantity - reservedQty
+        );
+
+      await inventory.save({ session });
+    }
+
+    /* ======================================
+       UPDATE TRANSACTION
+    ====================================== */
 
     transaction.status = 'rejected';
     transaction.faculty_approval.approved = false;
@@ -106,18 +147,27 @@ exports.rejectTransaction = async (req, res) => {
     transaction.faculty_approval.approved_at = new Date();
     transaction.faculty_approval.approval_token = undefined;
 
-    await transaction.save();
+    await transaction.save({ session });
 
-    res.json({
+    await session.commitTransaction();
+    session.endSession();
+
+    return res.json({
       success: true,
-      message: 'Transaction rejected successfully'
+      message: 'Transaction rejected successfully and stock released'
     });
 
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    await session.abortTransaction();
+    session.endSession();
+
+    console.error('REJECT TRANSACTION ERROR:', err);
+
+    return res.status(500).json({
+      error: err.message
+    });
   }
 };
-
 
 
 
@@ -508,9 +558,7 @@ exports.getTransactionHistory = async (req, res) => {
 /* =====================================================
    APPROVE FROM DASHBOARD
 ===================================================== */
-/* =====================================================
-   APPROVE TRANSACTION (DASHBOARD)
-===================================================== */
+
 exports.approveTransactionByFaculty = async (req, res) => {
   try {
     const { transaction_id } = req.params;
@@ -554,29 +602,65 @@ exports.approveTransactionByFaculty = async (req, res) => {
 /* =====================================================
    REJECT FROM DASHBOARD
 ===================================================== */
-/* =====================================================
-   REJECT TRANSACTION (DASHBOARD)
-===================================================== */
 exports.rejectTransactionByFaculty = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
   try {
     const { transaction_id } = req.params;
     const { reason } = req.body;
 
     const faculty = await getFaculty(req);
-    if (!faculty) return res.status(404).json({ error: 'Faculty not found' });
+    if (!faculty) {
+      await session.abortTransaction();
+      return res.status(404).json({ error: 'Faculty not found' });
+    }
 
     const transaction = await Transaction.findOne({
       transaction_id,
       faculty_email: faculty.email,
       faculty_id: faculty.faculty_id,
       status: 'raised'
-    });
+    }).session(session);
 
     if (!transaction) {
+      await session.abortTransaction();
       return res.status(400).json({
         error: 'Transaction not found or already processed'
       });
     }
+
+    /* ======================================
+       RELEASE TEMP RESERVED STOCK
+    ====================================== */
+
+    const LabInventory = require('../models/LabInventory');
+
+    for (const item of transaction.items) {
+
+      const inventory = await LabInventory.findOne({
+        lab_id: item.lab_id,
+        item_id: item.item_id
+      }).session(session);
+
+      if (!inventory) continue;
+
+      const reservedQty =
+        item.quantity ||
+        item.asset_ids?.length ||
+        0;
+
+      inventory.temp_reserved_quantity = Math.max(
+        0,
+        inventory.temp_reserved_quantity - reservedQty
+      );
+
+      await inventory.save({ session });
+    }
+
+    /* ======================================
+       UPDATE TRANSACTION
+    ====================================== */
 
     transaction.status = 'rejected';
     transaction.faculty_approval.approved = false;
@@ -584,15 +668,24 @@ exports.rejectTransactionByFaculty = async (req, res) => {
     transaction.faculty_approval.approved_at = new Date();
     transaction.faculty_approval.approval_token = undefined;
 
-    await transaction.save();
+    await transaction.save({ session });
 
-    res.json({
+    await session.commitTransaction();
+    session.endSession();
+
+    return res.json({
       success: true,
-      message: 'Transaction rejected successfully'
+      message: 'Transaction rejected successfully and stock released'
     });
 
   } catch (err) {
+    await session.abortTransaction();
+    session.endSession();
+
     console.error('Reject error:', err);
-    res.status(500).json({ error: 'Failed to reject transaction' });
+
+    return res.status(500).json({
+      error: 'Failed to reject transaction'
+    });
   }
 };
