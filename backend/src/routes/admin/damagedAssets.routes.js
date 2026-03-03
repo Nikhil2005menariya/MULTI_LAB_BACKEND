@@ -144,12 +144,22 @@ router.get('/', async (req, res) => {
 });
 
 /* =====================================================
-   3. UNDER-REPAIR LIST
+   3. UNDER-REPAIR LIST (LAB SPECIFIC)
    GET /api/admin/damaged-assets/under-repair/list
 ===================================================== */
 router.get('/under-repair/list', async (req, res) => {
   try {
+    const labId = req.user.lab_id;
+
+    if (!labId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Lab access denied'
+      });
+    }
+
     const assets = await ItemAsset.find({
+      lab_id: labId,              // 🔒 LAB ISOLATION
       status: 'damaged',
       condition: 'faulty'
     })
@@ -162,6 +172,7 @@ router.get('/under-repair/list', async (req, res) => {
       count: assets.length,
       data: assets
     });
+
   } catch (error) {
     console.error('Error fetching under-repair assets:', error);
     res.status(500).json({
