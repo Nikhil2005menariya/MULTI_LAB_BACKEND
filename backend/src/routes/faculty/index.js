@@ -6,7 +6,6 @@ const router = express.Router();
 ============================ */
 
 router.use('/', require('./approval.routes'));     // Public token approval
-router.use('/auth', require('./auth.routes'));     // Faculty auth
 router.use('/dashboard', require('./dashboard.routes')); // Protected dashboard
 
 module.exports = router;

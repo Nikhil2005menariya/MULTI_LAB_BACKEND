@@ -46,6 +46,14 @@ const facultySchema = new mongoose.Schema(
       type: Boolean,
       default: true
     },
+    reset_otp: {
+      type: String,
+      select: false
+    },
+    reset_otp_expiry: {
+      type: Date,
+      select: false
+    },
 
     last_login: Date
   },

@@ -11,7 +11,12 @@ const {
   resetPassword,
   changePassword,
   requestEmailChangeOTP,
-  confirmEmailChange
+  confirmEmailChange,
+  staffForgotPassword,
+  staffResetPassword,
+  staffChangePassword,
+  staffRequestEmailChangeOTP,
+  staffConfirmEmailChange
 } = require('../../controllers/auth.controller');
 
 /* =====================================================
@@ -22,10 +27,10 @@ const {
 router.post('/login', staffLogin);
 
 // Forgot password (send OTP)
-router.post('/forgot-password', forgotPassword);
+router.post('/forgot-password', staffForgotPassword);
 
 // Reset password using OTP
-router.post('/reset-password', resetPassword);
+router.post('/reset-password',staffResetPassword);
 
 
 /* =====================================================
@@ -33,13 +38,13 @@ router.post('/reset-password', resetPassword);
 ===================================================== */
 
 // Change password (while logged in)
-router.post('/change-password', auth, changePassword);
+router.post('/change-password', auth, staffChangePassword);
 
 // Request email change OTP
-router.post('/request-email-change', auth, requestEmailChangeOTP);
+router.post('/request-email-change', auth, staffRequestEmailChangeOTP);
 
 // Confirm email change
-router.post('/confirm-email-change', auth, confirmEmailChange);
+router.post('/confirm-email-change', auth, staffConfirmEmailChange);
 
 
 module.exports = router;

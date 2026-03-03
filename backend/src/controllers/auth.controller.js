@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const Staff = require('../models/Staff');
 const { sendMail } = require('../services/mail.service');
 const Student = require('../models/Student');
+const Faculty = require('../models/Faculty');
 
 /* ======================
    STUDENT LOGIN
@@ -108,44 +109,55 @@ exports.verifyStudentEmail = async (req, res) => {
 };
 
 
+/* =====================================================
+   STUDENT FORGOT PASSWORD – STRICT CHECK
+===================================================== */
 exports.studentForgotPassword = async (req, res) => {
   try {
     const { email } = req.body;
 
     if (!email) {
-      return res.status(400).json({ message: 'Email is required' });
+      return res.status(400).json({
+        error: 'Email is required'
+      });
     }
 
     const student = await Student.findOne({ email });
+
     if (!student) {
-      // security: don't reveal existence
-      return res.json({ success: true });
+      return res.status(404).json({
+        error: 'Student account not found'
+      });
     }
 
     const otp = crypto.randomInt(100000, 999999).toString();
 
     student.reset_otp = otp;
-    student.reset_otp_expiry = Date.now() + 15 * 60 * 1000; // 15 min
-    await student.save();
+    student.reset_otp_expiry = Date.now() + 15 * 60 * 1000;
 
-    const resetLink =
-      `${process.env.FRONTEND_URL}/student/reset-password?token=${otp}`;
+    await student.save();
 
     await sendMail({
       to: student.email,
-      subject: 'Student Password Reset',
+      subject: 'Student Password Reset OTP',
       html: `
-        <p>You requested a password reset.</p>
-        <p>click the link below:</p>
-        <a href="${resetLink}">Reset Password</a>
+        <p>Hello ${student.name},</p>
+        <p>Your password reset OTP is:</p>
+        <h2>${otp}</h2>
         <p>This OTP expires in 15 minutes.</p>
       `
     });
 
-    res.json({ success: true });
+    return res.json({
+      success: true,
+      message: 'OTP sent successfully'
+    });
+
   } catch (err) {
     console.error('Student forgot password error:', err);
-    res.status(500).json({ message: 'Failed to send reset email' });
+    return res.status(500).json({
+      error: 'Failed to send reset OTP'
+    });
   }
 };
 
@@ -242,31 +254,246 @@ exports.staffLogin = async (req, res) => {
 };
 
 
+
 /* =====================================================
-   FORGOT PASSWORD – SEND OTP
+   REGISTER FACULTY (SEND VERIFICATION EMAIL)
 ===================================================== */
-exports.forgotPassword = async (req, res) => {
+exports.registerFaculty = async (req, res) => {
+  try {
+    const { name, email, faculty_id } = req.body;
+
+    if (!name || !email || !faculty_id) {
+      return res.status(400).json({ message: 'Missing required fields' });
+    }
+
+    // Optional domain restriction
+    // if (!email.endsWith('@vit.ac.in')) {
+    //   return res.status(400).json({
+    //     message: 'Only official VIT email is allowed'
+    //   });
+    // }
+
+    const existing = await Faculty.findOne({ email });
+
+    if (existing) {
+      return res.status(400).json({
+        message: 'Faculty account already exists'
+      });
+    }
+
+    const verificationToken = crypto.randomBytes(32).toString('hex');
+
+    const faculty = await Faculty.create({
+      name,
+      email,
+      faculty_id,
+      verification_token: verificationToken,
+      verification_token_expiry: Date.now() + 1000 * 60 * 60, // 1 hour
+      is_verified: false
+    });
+
+    const verificationLink =
+      `${process.env.FRONTEND_URL}/faculty/verify?token=${verificationToken}`;
+
+    await sendMail({
+      to: email,
+      subject: 'Verify Your Faculty Account',
+      html: `
+        <p>Hello ${name},</p>
+        <p>Please verify your faculty account by clicking the link below:</p>
+        <a href="${verificationLink}">Verify Account</a>
+      `
+    });
+
+    res.status(201).json({
+      success: true,
+      message: 'Verification email sent'
+    });
+
+  } catch (err) {
+    console.error('Faculty register error:', err);
+    res.status(500).json({ message: 'Registration failed' });
+  }
+};
+
+
+/* =====================================================
+   VERIFY EMAIL
+===================================================== */
+exports.verifyEmail = async (req, res) => {
+  try {
+    const { token } = req.query;
+
+    if (!token) {
+      return res.status(400).json({ message: 'Verification token missing' });
+    }
+
+    const faculty = await Faculty.findOne({
+      verification_token: token,
+      verification_token_expiry: { $gt: Date.now() }
+    });
+
+    if (!faculty) {
+      return res.status(400).json({ message: 'Invalid or expired token' });
+    }
+
+    faculty.is_verified = true;
+    faculty.verification_token = undefined;
+    faculty.verification_token_expiry = undefined;
+
+    await faculty.save();
+
+    res.json({
+      success: true,
+      message: 'Email verified successfully'
+    });
+
+  } catch (err) {
+    console.error('Verification error:', err);
+    res.status(500).json({ message: 'Verification failed' });
+  }
+};
+
+
+
+/* =====================================================
+   SET PASSWORD (AFTER VERIFICATION)
+===================================================== */
+exports.setPassword = async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ message: 'Missing fields' });
+    }
+
+    const faculty = await Faculty.findOne({ email });
+
+    if (!faculty || !faculty.is_verified) {
+      return res.status(400).json({
+        message: 'Email not verified'
+      });
+    }
+
+    if (faculty.password) {
+      return res.status(400).json({
+        message: 'Password already set'
+      });
+    }
+
+    const hashed = await bcrypt.hash(password, 10);
+
+    faculty.password = hashed;
+    await faculty.save();
+
+    res.json({
+      success: true,
+      message: 'Password set successfully'
+    });
+
+  } catch (err) {
+    console.error('Set password error:', err);
+    res.status(500).json({ message: 'Failed to set password' });
+  }
+};
+
+
+
+/* =====================================================
+   LOGIN FACULTY
+===================================================== */
+exports.loginFaculty = async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    const faculty = await Faculty.findOne({ email }).select('+password');
+
+    if (!faculty || !faculty.is_verified) {
+      return res.status(400).json({
+        message: 'Invalid credentials or not verified'
+      });
+    }
+
+    const isMatch = await bcrypt.compare(password, faculty.password);
+
+    if (!isMatch) {
+      return res.status(400).json({
+        message: 'Invalid credentials'
+      });
+    }
+
+    faculty.last_login = new Date();
+    await faculty.save();
+
+    const token = require('jsonwebtoken').sign(
+      {
+        id: faculty._id,
+        role: 'faculty'
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: '1d' }
+    );
+
+    res.json({
+      success: true,
+      token,
+      user: {
+        id: faculty._id,
+        name: faculty.name,
+        email: faculty.email,
+        faculty_id: faculty.faculty_id
+      }
+    });
+
+  } catch (err) {
+    console.error('Faculty login error:', err);
+    res.status(500).json({ message: 'Login failed' });
+  }
+};
+
+
+/* =====================================================
+   FACULTY FORGOT PASSWORD – SEND OTP
+===================================================== */
+/* =====================================================
+   FACULTY FORGOT PASSWORD – STRICT CHECK
+===================================================== */
+exports.facultyForgotPassword = async (req, res) => {
   try {
     const { email } = req.body;
 
-    const staff = await Staff.findOne({ email });
+    if (!email) {
+      return res.status(400).json({
+        error: 'Email is required'
+      });
+    }
 
-    if (!staff) {
+    const faculty = await Faculty.findOne({ email });
+
+    if (!faculty) {
       return res.status(404).json({
-        error: 'Account not found'
+        error: 'Faculty account not found'
+      });
+    }
+
+    if (!faculty.is_verified) {
+      return res.status(403).json({
+        error: 'Faculty email not verified'
       });
     }
 
     const otp = crypto.randomInt(100000, 999999).toString();
 
-    staff.reset_otp = otp;
-    staff.reset_otp_expiry = Date.now() + 10 * 60 * 1000; // 10 mins
-    await staff.save();
+    faculty.reset_otp = otp;
+    faculty.reset_otp_expiry = Date.now() + 10 * 60 * 1000;
+
+    await faculty.save();
 
     await sendMail({
-      to: email,
-      subject: 'Password Reset OTP',
+      to: faculty.email,
+      subject: 'Faculty Password Reset OTP',
       html: `
+        <p>Hello ${faculty.name},</p>
         <p>Your password reset OTP is:</p>
         <h2>${otp}</h2>
         <p>This OTP expires in 10 minutes.</p>
@@ -275,12 +502,121 @@ exports.forgotPassword = async (req, res) => {
 
     return res.json({
       success: true,
-      message: 'OTP sent to registered email'
+      message: 'OTP sent successfully'
     });
 
   } catch (err) {
-    console.error('Forgot password error:', err);
-    return res.status(500).json({ error: 'Failed to send OTP' });
+    console.error('Faculty forgot password error:', err);
+    return res.status(500).json({
+      error: 'Failed to send reset OTP'
+    });
+  }
+};
+
+/* =====================================================
+   FACULTY RESET PASSWORD
+===================================================== */
+exports.facultyResetPassword = async (req, res) => {
+  try {
+    const { email, otp, newPassword } = req.body;
+
+    if (!email || !otp || !newPassword) {
+      return res.status(400).json({
+        message: 'Missing required fields'
+      });
+    }
+
+    const faculty = await Faculty.findOne({ email }).select(
+      '+reset_otp +reset_otp_expiry +password'
+    );
+
+    if (!faculty) {
+      return res.status(400).json({
+        message: 'Invalid or expired OTP'
+      });
+    }
+
+    if (
+      faculty.reset_otp !== otp ||
+      Date.now() > faculty.reset_otp_expiry
+    ) {
+      return res.status(400).json({
+        message: 'Invalid or expired OTP'
+      });
+    }
+
+    faculty.password = await bcrypt.hash(newPassword, 10);
+    faculty.reset_otp = undefined;
+    faculty.reset_otp_expiry = undefined;
+
+    await faculty.save();
+
+    return res.json({
+      success: true,
+      message: 'Password reset successful'
+    });
+
+  } catch (err) {
+    console.error('Faculty reset password error:', err);
+    return res.status(500).json({
+      message: 'Failed to reset password'
+    });
+  }
+};
+
+
+/* =====================================================
+   FORGOT PASSWORD – SEND OTP
+===================================================== */
+/* =====================================================
+   STAFF FORGOT PASSWORD – STRICT CHECK
+===================================================== */
+exports.staffForgotPassword = async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({
+        error: 'Email is required'
+      });
+    }
+
+    const staff = await Staff.findOne({ email });
+
+    if (!staff) {
+      return res.status(404).json({
+        error: 'Staff account not found'
+      });
+    }
+
+    const otp = crypto.randomInt(100000, 999999).toString();
+
+    staff.reset_otp = otp;
+    staff.reset_otp_expiry = Date.now() + 10 * 60 * 1000;
+
+    await staff.save();
+
+    await sendMail({
+      to: staff.email,
+      subject: 'Password Reset OTP',
+      html: `
+        <p>Hello ${staff.name},</p>
+        <p>Your password reset OTP is:</p>
+        <h2>${otp}</h2>
+        <p>This OTP expires in 10 minutes.</p>
+      `
+    });
+
+    return res.json({
+      success: true,
+      message: 'OTP sent successfully'
+    });
+
+  } catch (err) {
+    console.error('Staff forgot password error:', err);
+    return res.status(500).json({
+      error: 'Failed to send OTP'
+    });
   }
 };
 
@@ -288,7 +624,7 @@ exports.forgotPassword = async (req, res) => {
 /* =====================================================
    RESET PASSWORD USING OTP
 ===================================================== */
-exports.resetPassword = async (req, res) => {
+exports.staffResetPassword = async (req, res) => {
   try {
     const { email, otp, newPassword } = req.body;
 
@@ -336,7 +672,7 @@ exports.resetPassword = async (req, res) => {
 /* =====================================================
    CHANGE PASSWORD (LOGGED IN)
 ===================================================== */
-exports.changePassword = async (req, res) => {
+exports.staffChangePassword = async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body;
 
@@ -372,7 +708,7 @@ exports.changePassword = async (req, res) => {
 /* =====================================================
    REQUEST EMAIL CHANGE – SEND OTP
 ===================================================== */
-exports.requestEmailChangeOTP = async (req, res) => {
+exports.staffRequestEmailChangeOTP = async (req, res) => {
   try {
     const { newEmail } = req.body;
 
@@ -429,7 +765,7 @@ exports.requestEmailChangeOTP = async (req, res) => {
 /* =====================================================
    CONFIRM EMAIL CHANGE
 ===================================================== */
-exports.confirmEmailChange = async (req, res) => {
+exports.staffConfirmEmailChange = async (req, res) => {
   try {
     const { newEmail, otp } = req.body;
 

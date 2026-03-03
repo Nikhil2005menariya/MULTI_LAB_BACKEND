@@ -378,6 +378,108 @@ exports.loginFaculty = async (req, res) => {
 };
 
 
+/* =====================================================
+   FACULTY FORGOT PASSWORD – SEND OTP
+===================================================== */
+exports.facultyForgotPassword = async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({
+        message: 'Email is required'
+      });
+    }
+
+    const faculty = await Faculty.findOne({ email });
+
+    // Do NOT reveal if email exists (security best practice)
+    if (!faculty || !faculty.is_verified) {
+      return res.json({ success: true });
+    }
+
+    const otp = crypto.randomInt(100000, 999999).toString();
+
+    faculty.reset_otp = otp;
+    faculty.reset_otp_expiry = Date.now() + 10 * 60 * 1000; // 10 mins
+
+    await faculty.save();
+
+    await sendMail({
+      to: faculty.email,
+      subject: 'Faculty Password Reset OTP',
+      html: `
+        <p>Hello ${faculty.name},</p>
+        <p>Your password reset OTP is:</p>
+        <h2>${otp}</h2>
+        <p>This OTP expires in 10 minutes.</p>
+      `
+    });
+
+    return res.json({
+      success: true,
+      message: 'If account exists, OTP has been sent'
+    });
+
+  } catch (err) {
+    console.error('Faculty forgot password error:', err);
+    return res.status(500).json({
+      message: 'Failed to send reset OTP'
+    });
+  }
+};
+
+/* =====================================================
+   FACULTY RESET PASSWORD
+===================================================== */
+exports.facultyResetPassword = async (req, res) => {
+  try {
+    const { email, otp, newPassword } = req.body;
+
+    if (!email || !otp || !newPassword) {
+      return res.status(400).json({
+        message: 'Missing required fields'
+      });
+    }
+
+    const faculty = await Faculty.findOne({ email }).select(
+      '+reset_otp +reset_otp_expiry +password'
+    );
+
+    if (!faculty) {
+      return res.status(400).json({
+        message: 'Invalid or expired OTP'
+      });
+    }
+
+    if (
+      faculty.reset_otp !== otp ||
+      Date.now() > faculty.reset_otp_expiry
+    ) {
+      return res.status(400).json({
+        message: 'Invalid or expired OTP'
+      });
+    }
+
+    faculty.password = await bcrypt.hash(newPassword, 10);
+    faculty.reset_otp = undefined;
+    faculty.reset_otp_expiry = undefined;
+
+    await faculty.save();
+
+    return res.json({
+      success: true,
+      message: 'Password reset successful'
+    });
+
+  } catch (err) {
+    console.error('Faculty reset password error:', err);
+    return res.status(500).json({
+      message: 'Failed to reset password'
+    });
+  }
+};
+
 
 /* =====================================================
    ================ DASHBOARD FLOW =====================

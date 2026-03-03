@@ -5,6 +5,7 @@ router.use('/admin', require('./admin'));
 router.use('/student', require('./student'));
 router.use('/auth/staff', require('./auth/staff.routes'));
 router.use('/auth/student', require('./auth/student.routes'));
+router.use('/auth/faculty', require('./auth/faculty.routes'));
 router.use('/faculty', require('./faculty'));
 
 router.use('/assistant', require('./assistant'));

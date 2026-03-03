@@ -5,9 +5,9 @@ const auth = require('../../middlewares/auth.middleware');
 const role = require('../../middlewares/role.middleware');
 
 const {
-  changePassword,
-  requestEmailChangeOTP,
-  confirmEmailChange
+  staffChangePassword,
+  staffRequestEmailChangeOTP,
+  staffConfirmEmailChange,
 } = require('../../controllers/auth.controller');
 
 /* =====================================================
@@ -18,13 +18,12 @@ const {
 // 🔒 Assistant only
 router.use(auth, role('assistant'));
 
-// Change password
-router.post('/change-password', changePassword);
+router.post('/change-password', staffChangePassword);
 
 // Request email change OTP
-router.post('/request-email-change', requestEmailChangeOTP);
+router.post('/request-email-change', staffRequestEmailChangeOTP);
 
 // Confirm email change
-router.post('/confirm-email-change', confirmEmailChange);
+router.post('/confirm-email-change', staffConfirmEmailChange);
 
 module.exports = router;

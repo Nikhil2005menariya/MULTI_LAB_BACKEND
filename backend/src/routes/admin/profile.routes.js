@@ -9,7 +9,10 @@ const role = require('../../middlewares/role.middleware');
 const {
   changePassword,
   requestEmailChangeOTP,
-  confirmEmailChange
+  confirmEmailChange,
+  staffConfirmEmailChange,
+  staffRequestEmailChangeOTP,
+  staffChangePassword
 } = require('../../controllers/auth.controller');
 
 /* =====================================================
@@ -20,12 +23,12 @@ const {
 router.use(auth, role('incharge'));
 
 // Change password
-router.post('/change-password', changePassword);
+router.post('/change-password', staffChangePassword);
 
 // Request email change OTP
-router.post('/request-email-change', requestEmailChangeOTP);
+router.post('/request-email-change', staffRequestEmailChangeOTP);
 
 // Confirm email change
-router.post('/confirm-email-change', confirmEmailChange);
+router.post('/confirm-email-change', staffConfirmEmailChange);
 
 module.exports = router;
