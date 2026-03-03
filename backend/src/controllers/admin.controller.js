@@ -820,7 +820,9 @@ exports.getItemById = async (req, res) => {
         category: item.category,
         description: item.description,
         tracking_type: item.tracking_type,
-        is_student_visible: item.is_student_visible,
+
+        // 🔥 CORRECT SOURCE
+        is_student_visible: inventory.is_student_visible,
 
         total_quantity: inventory.total_quantity,
         available_quantity: inventory.available_quantity,
