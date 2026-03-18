@@ -20,6 +20,7 @@ router.use(auth, role('incharge'));
 router.get('/history', async (req, res) => {
   try {
     const labId = req.user.lab_id;
+
     if (!labId) {
       return res.status(403).json({
         success: false,
@@ -28,6 +29,11 @@ router.get('/history', async (req, res) => {
     }
 
     const { item, vendor, status, from, to } = req.query;
+
+    // Pagination
+    const page = Math.max(parseInt(req.query.page) || 1, 1);
+    const limit = Math.min(parseInt(req.query.limit) || 25, 100);
+    const skip = (page - 1) * limit;
 
     const match = {};
 
@@ -39,24 +45,30 @@ router.get('/history', async (req, res) => {
       if (to) match.reported_at.$lte = new Date(to);
     }
 
-    const logs = await DamagedAssetLog.find(match)
-      .populate({
-        path: 'asset_id',
-        match: {
-          lab_id: labId, // 🔒 Lab Isolation
-          ...(vendor && { vendor: new RegExp(vendor, 'i') })
-        },
-        populate: {
-          path: 'item_id',
+    // Parallel execution
+    const [totalItems, logs] = await Promise.all([
+      DamagedAssetLog.countDocuments(match), // same logic (no lab filter here intentionally)
+      DamagedAssetLog.find(match)
+        .populate({
+          path: 'asset_id',
           match: {
-            ...(item && { name: new RegExp(item, 'i') })
+            lab_id: labId,
+            ...(vendor && { vendor: new RegExp(vendor, 'i') })
+          },
+          populate: {
+            path: 'item_id',
+            match: {
+              ...(item && { name: new RegExp(item, 'i') })
+            }
           }
-        }
-      })
-      .sort({ reported_at: -1 })
-      .lean();
+        })
+        .sort({ reported_at: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean()
+    ]);
 
-    // Remove null joins
+    // Remove null joins (same as before)
     const data = logs
       .filter(l => l.asset_id && l.asset_id.item_id)
       .map(l => ({
@@ -67,7 +79,6 @@ router.get('/history', async (req, res) => {
         asset_status: l.asset_id.status,
         asset_condition: l.asset_id.condition,
 
-        /* 🔥 CORRECT VENDOR SOURCE */
         vendor: l.asset_id.vendor,
 
         item_name: l.asset_id.item_id.name,
@@ -85,21 +96,24 @@ router.get('/history', async (req, res) => {
         reported_at: l.reported_at
       }));
 
-    res.json({
+    return res.json({
       success: true,
+      page,
+      limit,
+      totalItems,
+      totalPages: Math.ceil(totalItems / limit),
       count: data.length,
       data
     });
 
   } catch (error) {
     console.error('Error fetching damaged asset history:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: 'Failed to fetch damaged asset history'
     });
   }
 });
-
 /* =====================================================
    2. CURRENT DAMAGED / UNDER-REPAIR (SUMMARY VIEW)
    GET /api/admin/damaged-assets

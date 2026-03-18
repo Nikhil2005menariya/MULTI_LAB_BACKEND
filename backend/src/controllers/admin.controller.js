@@ -1364,9 +1364,6 @@ exports.getLabTransferDetail = async (req, res) => {
 
 
 //feed back requests
-/* ============================
-   GET ALL COMPONENT REQUESTS (LAB SAFE)
-============================ */
 exports.getAllComponentRequests = async (req, res) => {
   try {
     const labId = req.user.lab_id;
@@ -1386,6 +1383,11 @@ exports.getAllComponentRequests = async (req, res) => {
       component_name
     } = req.query;
 
+    // Pagination
+    const page = Math.max(parseInt(req.query.page) || 1, 1);
+    const limit = Math.min(parseInt(req.query.limit) || 25, 100);
+    const skip = (page - 1) * limit;
+
     /* ===============================
        BASE FILTER (LAB ISOLATION)
     =============================== */
@@ -1404,13 +1406,23 @@ exports.getAllComponentRequests = async (req, res) => {
       filter.component_name = new RegExp(component_name, 'i');
     }
 
-    const requests = await ComponentRequest.find(filter)
-      .populate('student_id', 'name reg_no email')
-      .sort({ createdAt: -1 })
-      .lean();
+    // Parallel execution
+    const [totalItems, requests] = await Promise.all([
+      ComponentRequest.countDocuments(filter),
+      ComponentRequest.find(filter)
+        .populate('student_id', 'name reg_no email')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean()
+    ]);
 
     return res.json({
       success: true,
+      page,
+      limit,
+      totalItems,
+      totalPages: Math.ceil(totalItems / limit),
       count: requests.length,
       data: requests
     });
@@ -1614,6 +1626,11 @@ exports.getBills = async (req, res) => {
       bill_type
     } = req.query;
 
+    // Pagination
+    const page = Math.max(parseInt(req.query.page) || 1, 1);
+    const limit = Math.min(parseInt(req.query.limit) || 25, 100);
+    const skip = (page - 1) * limit;
+
     const filter = {
       lab_id: labId
     };
@@ -1672,13 +1689,23 @@ exports.getBills = async (req, res) => {
       };
     }
 
-    const bills = await Bill.find(filter)
-      .populate('uploaded_by', 'name email')
-      .sort({ bill_date: -1, createdAt: -1 })
-      .lean();
+    // Parallel execution
+    const [totalItems, bills] = await Promise.all([
+      Bill.countDocuments(filter),
+      Bill.find(filter)
+        .populate('uploaded_by', 'name email')
+        .sort({ bill_date: -1, createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean()
+    ]);
 
     return res.json({
       success: true,
+      page,
+      limit,
+      totalItems,
+      totalPages: Math.ceil(totalItems / limit),
       count: bills.length,
       data: bills
     });
@@ -1691,7 +1718,6 @@ exports.getBills = async (req, res) => {
     });
   }
 };
-
 /* ============================
    DOWNLOAD / VIEW BILL (LAB SAFE)
 ============================ */
