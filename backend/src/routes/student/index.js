@@ -9,5 +9,6 @@ const router = express.Router();
 router.use('/items', require('./items.routes'));
 router.use('/transactions', require('./transactions.routes'));
 router.use('/component-requests', require('./componentRequest.routes'));
+router.use('/profile', require('./profile.routes'));
 
 module.exports = router;

@@ -1,6 +1,6 @@
 const mongoose = require('mongoose');
 const crypto = require('crypto');
-
+const bcrypt = require('bcrypt');
 const Transaction = require('../models/Transaction');
 const Item = require('../models/Item');
 const Lab = require('../models/Lab');
@@ -626,5 +626,79 @@ exports.getAllLabsForStudents = async (req, res) => {
     return res.status(500).json({
       error: 'Failed to load labs'
     });
+  }
+};
+
+/* ============================
+   GET MY PROFILE
+============================ */
+exports.getProfile = async (req, res) => {
+  try {
+    const student = await Student.findById(req.user.id).select(
+      'name email reg_no is_active is_verified createdAt'
+    );
+ 
+    if (!student) {
+      return res.status(404).json({ error: 'Student not found' });
+    }
+ 
+    return res.json({
+      success: true,
+      data: student,
+    });
+  } catch (err) {
+    console.error('GET PROFILE ERROR:', err);
+    return res.status(500).json({ error: 'Failed to fetch profile' });
+  }
+};
+ 
+/* ============================
+   CHANGE PASSWORD
+============================ */
+exports.changePassword = async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+ 
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({
+        error: 'Current password and new password are required',
+      });
+    }
+ 
+    if (newPassword.length < 6) {
+      return res.status(400).json({
+        error: 'New password must be at least 6 characters',
+      });
+    }
+ 
+    if (currentPassword === newPassword) {
+      return res.status(400).json({
+        error: 'New password must be different from current password',
+      });
+    }
+ 
+    // Explicitly select password (select: false in schema)
+    const student = await Student.findById(req.user.id).select('+password');
+ 
+    if (!student) {
+      return res.status(404).json({ error: 'Student not found' });
+    }
+ 
+    const isMatch = await bcrypt.compare(currentPassword, student.password);
+    if (!isMatch) {
+      return res.status(401).json({ error: 'Current password is incorrect' });
+    }
+ 
+    const hashed = await bcrypt.hash(newPassword, 10);
+    student.password = hashed;
+    await student.save();
+ 
+    return res.json({
+      success: true,
+      message: 'Password updated successfully',
+    });
+  } catch (err) {
+    console.error('CHANGE PASSWORD ERROR:', err);
+    return res.status(500).json({ error: 'Failed to update password' });
   }
 };
