@@ -526,30 +526,65 @@ exports.getFacultyProfile = async (req, res) => {
 exports.getAllTransactions = async (req, res) => {
   try {
     const faculty = await getFaculty(req);
-    if (!faculty) return res.status(404).json({ error: 'Faculty not found' });
+    if (!faculty) {
+      return res.status(404).json({ error: 'Faculty not found' });
+    }
 
-    const transactions = await Transaction.find({
+    // Pagination
+    const page = Math.max(parseInt(req.query.page) || 1, 1);
+    const limit = Math.min(parseInt(req.query.limit) || 25, 100);
+    const skip = (page - 1) * limit;
+
+    const search = (req.query.search || '').trim();
+
+    // Base filter
+    const filter = {
       faculty_email: faculty.email,
       faculty_id: faculty.faculty_id
-    })
-      .select('+project_name')
-      .populate('student_id', 'name reg_no email')
-      .populate('items.item_id', 'name sku tracking_type')
-      .populate('issued_by_incharge_id', 'name email')
-      .sort({ createdAt: -1 })
-      .lean();
+    };
 
-    res.json({
+    // 🔍 Search filter (prefix match)
+    if (search) {
+      const regex = new RegExp(`^${search}`, 'i');
+
+      filter.$or = [
+        { transaction_id: regex },
+        { project_name: regex },
+        { student_reg_no: regex }
+      ];
+    }
+
+    // Parallel execution
+    const [totalItems, transactions] = await Promise.all([
+      Transaction.countDocuments(filter),
+      Transaction.find(filter)
+        .select('+project_name')
+        .populate('student_id', 'name reg_no email')
+        .populate('items.item_id', 'name sku tracking_type')
+        .populate('issued_by_incharge_id', 'name email')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean()
+    ]);
+
+    return res.json({
       success: true,
+      page,
+      limit,
+      totalItems,
+      totalPages: Math.ceil(totalItems / limit),
       count: transactions.length,
       data: transactions
     });
 
   } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch transactions' });
+    console.error('GET FACULTY TRANSACTIONS ERROR:', err);
+    return res.status(500).json({
+      error: 'Failed to fetch transactions'
+    });
   }
 };
-
 
 /* =====================================================
    GET PENDING TRANSACTIONS
