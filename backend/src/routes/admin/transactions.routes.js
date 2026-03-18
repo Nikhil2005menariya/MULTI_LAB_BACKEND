@@ -6,8 +6,10 @@ const role = require('../../middlewares/role.middleware');
 
 const {
   getTransactionHistory,
-  searchTransactions
+  searchTransactions,
+  getAdminDashboard
 } = require('../../controllers/admin.controller');
+const { route } = require('./items.routes');
 
 router.use(auth, role('incharge'));
 // GET all transactions (history)
@@ -15,5 +17,7 @@ router.get('/history', getTransactionHistory);
 
 // GET search transactions
 router.get('/search', searchTransactions);
+
+router.get('/dashboard',getAdminDashboard);
 
 module.exports = router;

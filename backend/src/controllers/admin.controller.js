@@ -15,6 +15,133 @@ const { PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
 const s3 = require('../utils/s3');
 
 
+
+exports.getAdminDashboard = async (req, res) => {
+  try {
+    const labId = req.user.lab_id;
+
+    if (!labId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Lab access denied'
+      });
+    }
+
+    const now = new Date();
+    const labObjectId = new mongoose.Types.ObjectId(String(labId));
+
+    /* =============================
+       INCHARGE NAME
+    ============================= */
+    const incharge = await Staff.findById(req.user._id || req.user.id).select('name');
+
+    /* =============================
+       TOTAL ITEMS IN LAB
+    ============================= */
+    const totalItems = await LabInventory.countDocuments({
+      lab_id: labObjectId
+    });
+
+    /* =============================
+       TRANSACTION STATS
+    ============================= */
+    const transactionStats = await Transaction.aggregate([
+      {
+        $match: {
+          items: {
+            $elemMatch: { lab_id: labObjectId }
+          }
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          total_transactions: { $sum: 1 },
+          active_transactions: {
+            $sum: {
+              $cond: [{ $eq: ['$status', 'active'] }, 1, 0]
+            }
+          },
+          overdue_transactions: {
+            $sum: {
+              $cond: [
+                {
+                  $and: [
+                    { $eq: ['$status', 'active'] },
+                    { $lt: ['$expected_return_date', now] }
+                  ]
+                },
+                1,
+                0
+              ]
+            }
+          }
+        }
+      }
+    ]);
+
+    const stats = transactionStats[0] || {
+      total_transactions: 0,
+      active_transactions: 0,
+      overdue_transactions: 0
+    };
+
+    /* =============================
+       PENDING INCOMING TRANSFERS
+    ============================= */
+    const pendingTransfers = await Transaction.countDocuments({
+      transaction_type: 'lab_transfer',
+      target_lab_id: labObjectId,
+      status: 'raised'
+    });
+
+    /* =============================
+       PENDING COMPONENT REQUESTS
+    ============================= */
+    const pendingRequests = await ComponentRequest.countDocuments({
+      lab_id: labObjectId,
+      status: 'pending'
+    });
+
+    /* =============================
+       DAMAGED ASSETS
+    ============================= */
+    const damagedAssets = await ItemAsset.countDocuments({
+      lab_id: labObjectId,
+      status: 'damaged'
+    });
+
+    /* =============================
+       RESPONSE
+    ============================= */
+    return res.json({
+      success: true,
+      data: {
+        incharge_name: incharge?.name || 'Incharge',
+        inventory: {
+          total_items: totalItems,
+          active_transactions: stats.active_transactions,
+          overdue_transactions: stats.overdue_transactions,
+          total_transactions: stats.total_transactions
+        },
+        attention: {
+          pending_incoming_transfers: pendingTransfers,
+          pending_component_requests: pendingRequests,
+          damaged_assets: damagedAssets
+        }
+      }
+    });
+
+  } catch (err) {
+    console.error('Dashboard error:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch dashboard'
+    });
+  }
+};
+
+
 /* =========================
    INVENTORY MANAGEMENT
 ========================= */
@@ -2333,4 +2460,5 @@ exports.completeReturn = async (req, res) => {
     session.endSession();
   }
 };
+
 
