@@ -14,10 +14,29 @@ const { sendMail } = require('../services/mail.service');
 ============================ */
 exports.getAllItems = async (req, res) => {
   try {
+    const page = Math.max(parseInt(req.query.page) || 1, 1);
+    const limit = Math.min(parseInt(req.query.limit) || 25, 100);
+    const skip = (page - 1) * limit;
 
-    const items = await LabInventory.aggregate([
+    const search = (req.query.search || '').trim();
 
-      /* 🔥 LAB-SCOPED VISIBILITY FIX */
+    // 🔥 Build search match
+    let searchMatch = {};
+    if (search) {
+      const regex = new RegExp(`^${search}`, 'i'); // prefix match (fast)
+
+      searchMatch = {
+        $or: [
+          { 'item.name': regex },
+          { 'item.sku': regex },
+          { 'item.category': regex }
+        ]
+      };
+    }
+
+    const result = await LabInventory.aggregate([
+
+      /* 🔥 STUDENT VISIBILITY */
       {
         $match: {
           is_student_visible: true
@@ -39,6 +58,9 @@ exports.getAllItems = async (req, res) => {
           'item.is_active': true
         }
       },
+
+      /* 🔍 SEARCH (ONLY IF PRESENT) */
+      ...(search ? [{ $match: searchMatch }] : []),
 
       {
         $addFields: {
@@ -74,15 +96,36 @@ exports.getAllItems = async (req, res) => {
         }
       },
 
-      { $sort: { name: 1 } }
+      { $sort: { name: 1 } },
+
+      {
+        $facet: {
+          data: [
+            { $skip: skip },
+            { $limit: limit }
+          ],
+          totalCount: [
+            { $count: 'count' }
+          ]
+        }
+      }
     ]);
+
+    const data = result[0]?.data || [];
+    const totalItems = result[0]?.totalCount[0]?.count || 0;
 
     return res.json({
       success: true,
-      data: items
+      page,
+      limit,
+      totalItems,
+      totalPages: Math.ceil(totalItems / limit),
+      count: data.length,
+      data
     });
 
   } catch (err) {
+    console.error('GET STUDENT ITEMS ERROR:', err);
     return res.status(500).json({
       error: 'Failed to load items'
     });
