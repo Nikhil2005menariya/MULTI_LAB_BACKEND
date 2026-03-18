@@ -1,16 +1,14 @@
 const mongoose = require('mongoose');
 
 /* ============================
-   TRANSACTION ITEM (CROSS-LAB SAFE)
+   TRANSACTION ITEM
 ============================ */
 const transactionItemSchema = new mongoose.Schema(
   {
-    /* 🔥 LAB FROM WHICH ITEM IS MOVING */
     lab_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Lab',
-      required: true,
-      index: true
+      required: true
     },
 
     item_id: {
@@ -19,18 +17,12 @@ const transactionItemSchema = new mongoose.Schema(
       required: true
     },
 
-    /* =====================
-       BULK TRACKING
-    ===================== */
     quantity: {
       type: Number,
       default: 0,
       min: 0
     },
 
-    /* =====================
-       ASSET TRACKING
-    ===================== */
     asset_ids: [
       {
         type: mongoose.Schema.Types.ObjectId,
@@ -38,56 +30,21 @@ const transactionItemSchema = new mongoose.Schema(
       }
     ],
 
-    /* =====================
-       SYSTEM COUNTS
-    ===================== */
-    issued_quantity: {
-      type: Number,
-      default: 0,
-      min: 0
-    },
-
-    returned_quantity: {
-      type: Number,
-      default: 0,
-      min: 0
-    },
-
-    damaged_quantity: {
-      type: Number,
-      default: 0,
-      min: 0
-    }
+    issued_quantity: { type: Number, default: 0, min: 0 },
+    returned_quantity: { type: Number, default: 0, min: 0 },
+    damaged_quantity: { type: Number, default: 0, min: 0 }
   },
   { _id: false }
 );
-
 
 /* ============================
    TRANSACTION SCHEMA
 ============================ */
 const transactionSchema = new mongoose.Schema(
   {
-    /* =====================
-       IDENTIFIER
-    ===================== */
-    transaction_id: {
-      type: String,
-      required: true,
-      unique: true,
-      index: true
-    },
+    transaction_id: { type: String, required: true, unique: true, index: true },
+    project_name: { type: String, required: true, trim: true, index: true },
 
-    project_name: {
-      type: String,
-      required: true,
-      trim: true,
-      index: true
-    },
-
-    /* =====================
-       TYPE
-    ===================== */
     transaction_type: {
       type: String,
       enum: ['regular', 'lab_session', 'lab_transfer'],
@@ -95,166 +52,123 @@ const transactionSchema = new mongoose.Schema(
       index: true
     },
 
-    /* =====================
-       TRANSFER DETAILS
-    ===================== */
     transfer_type: {
       type: String,
       enum: ['temporary', 'permanent'],
       default: null
     },
 
-    /* 🔥 SOURCE LAB (NEW) */
     source_lab_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Lab',
-      default: null,
       index: true
     },
 
-    source_lab_name_snapshot: {
-      type: String,
-      default: null
-    },
+    source_lab_name_snapshot: String,
 
-    /* 🔥 TARGET LAB */
     target_lab_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Lab',
-      default: null,
       index: true
     },
 
-    target_lab_name_snapshot: {
-      type: String,
-      default: null
-    },
+    target_lab_name_snapshot: String,
 
-    /* =====================
-       TRANSFER HANDOVER META
-    ===================== */
     handover_faculty_name: String,
     handover_faculty_email: String,
     handover_faculty_id: String,
 
-    /* =====================
-       LAB SESSION ONLY
-    ===================== */
-    issued_directly: {
-      type: Boolean,
-      default: false
-    },
-
+    issued_directly: { type: Boolean, default: false },
     lab_slot: String,
 
-    /* =====================
-       STATUS
-    ===================== */
     status: {
       type: String,
       enum: [
-        'raised',           // created
-        'approved',         // optional stage
-        'active',           // issued / transferred
-        'return_requested', // temporary only
-        'completed',        // fully done
-        'overdue',
-        'rejected',
-        'partial_returned',
-        'partial_issued',
+        'raised','approved','active','return_requested','completed',
+        'overdue','rejected','partial_returned','partial_issued'
       ],
       default: 'raised',
       index: true
     },
 
-    /* =====================
-       STUDENT INFO
-    ===================== */
     student_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Student',
-      default: null,
       index: true
     },
 
-    student_reg_no: {
-      type: String,
-      required: true,
-      index: true
-    },
+    student_reg_no: { type: String, required: true, index: true },
 
-    /* =====================
-       FACULTY INFO
-    ===================== */
-    faculty_email: String,
-    faculty_id: String,
+    faculty_email: { type: String, index: true },
+    faculty_id: { type: String, index: true },
 
-    /* =====================
-       ITEMS
-    ===================== */
     items: [transactionItemSchema],
 
-    /* =====================
-       FACULTY APPROVAL
-    ===================== */
     faculty_approval: {
-      approved: {
-        type: Boolean,
-        default: false
-      },
+      approved: { type: Boolean, default: false },
       approved_at: Date,
       approval_token: String,
       rejected_reason: String
     },
 
-    /* =====================
-       ISSUE DETAILS
-    ===================== */
     issued_by_incharge_id: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'Staff'
+      ref: 'Staff',
+      index: true
     },
 
     issued_at: Date,
 
-    /* =====================
-       RETURN DETAILS
-    ===================== */
     expected_return_date: {
       type: Date,
       required: function () {
-        return (
-          this.transaction_type === 'lab_transfer' &&
-          this.transfer_type === 'temporary'
-        );
+        return this.transaction_type === 'lab_transfer' &&
+               this.transfer_type === 'temporary';
       },
       index: true
     },
 
     actual_return_date: Date,
-
     damage_notes: String,
 
-    /* =====================
-       OVERDUE CONTROL
-    ===================== */
-    overdue_notified: {
-      type: Boolean,
-      default: false
-    }
+    overdue_notified: { type: Boolean, default: false }
   },
   { timestamps: true }
 );
 
-
 /* ============================
-   INDEXING FOR SCALE
+   INDEXES (ONLY HERE)
 ============================ */
 
-transactionSchema.index({ student_id: 1, status: 1 });
-transactionSchema.index({ transaction_type: 1, status: 1 });
-transactionSchema.index({ source_lab_id: 1, status: 1 });
-transactionSchema.index({ target_lab_id: 1, status: 1 });
+// Core
+transactionSchema.index({ "items.lab_id": 1 });
+transactionSchema.index({ "items.item_id": 1 });
+transactionSchema.index({ "items.asset_ids": 1 });
+
+// Pagination / sorting
 transactionSchema.index({ createdAt: -1 });
+
+// Sessions
+transactionSchema.index({
+  transaction_type: 1,
+  "items.lab_id": 1,
+  createdAt: -1
+});
+
+// Transfers
+transactionSchema.index({
+  transaction_type: 1,
+  "items.lab_id": 1,
+  target_lab_id: 1,
+  createdAt: -1
+});
+
+// Search
+transactionSchema.index({
+  transaction_id: 1,
+  student_reg_no: 1,
+  faculty_email: 1,
+  status: 1
+});
 
 module.exports = mongoose.model('Transaction', transactionSchema);

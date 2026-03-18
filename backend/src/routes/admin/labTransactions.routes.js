@@ -17,6 +17,8 @@ const {
   decideTransferRequest,
   initiateReturn,
   completeReturn,
+   searchLabSessions,     // ✅ ADD
+  searchLabTransfers, 
 } = require('../../controllers/admin.controller');
 
 // 🔒 Only lab incharge & assistant
@@ -24,10 +26,12 @@ router.use(auth, role('incharge', 'assistant'));
 
 /* ===== LAB SESSIONS ===== */
 router.get('/lab-sessions', getLabSessions);
+router.get('/lab-sessions/search', searchLabSessions);
 router.get('/lab-sessions/:id', getLabSessionDetail);
 
 /* ===== LAB TRANSFERS ===== */
 router.get('/lab-transfers', getLabTransfers);
+router.get('/lab-transfers/search', searchLabTransfers);
 router.get('/lab-transfers/:id', getLabTransferDetail);
 
 

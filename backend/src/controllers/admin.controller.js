@@ -686,17 +686,26 @@ exports.getTransactionHistory = async (req, res) => {
       });
     }
 
-    const transactions = await Transaction.find({
-      'items.lab_id': labId
-    })
-      .populate('student_id', 'name reg_no email')
-      .populate('items.item_id', 'name sku tracking_type')
-      .populate('items.asset_ids', 'asset_tag') // 🔥 fetch asset tags
-      .populate('issued_by_incharge_id', 'name email')
-      .sort({ createdAt: -1 })
-      .lean();
+    // Pagination params
+    const page = Math.max(parseInt(req.query.page) || 1, 1);
+    const limit = Math.min(parseInt(req.query.limit) || 25, 100);
+    const skip = (page - 1) * limit;
 
-    // Attach asset_tags array
+    // Run in parallel
+    const [totalItems, transactions] = await Promise.all([
+      Transaction.countDocuments({ 'items.lab_id': labId }), // same logic
+      Transaction.find({ 'items.lab_id': labId })
+        .populate('student_id', 'name reg_no email')
+        .populate('items.item_id', 'name sku tracking_type')
+        .populate('items.asset_ids', 'asset_tag')
+        .populate('issued_by_incharge_id', 'name email')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean()
+    ]);
+
+    // Attach asset_tags array (same logic)
     const formatted = transactions.map(tx => ({
       ...tx,
       items: tx.items.map(item => ({
@@ -709,6 +718,10 @@ exports.getTransactionHistory = async (req, res) => {
 
     return res.json({
       success: true,
+      page,
+      limit,
+      totalItems,
+      totalPages: Math.ceil(totalItems / limit),
       count: formatted.length,
       data: formatted
     });
@@ -736,26 +749,91 @@ exports.searchTransactions = async (req, res) => {
       reg_no,
       faculty_email,
       faculty_id,
-      status
+      status,
+      item_name,
+      asset_tag,
+      page = 1,
+      limit = 25
     } = req.query;
+
+    const pageNum = Math.max(parseInt(page), 1);
+    const limitNum = Math.min(parseInt(limit), 100);
+    const skip = (pageNum - 1) * limitNum;
+
+    const Transaction = require('../models/Transaction');
+    const Item = require('../models/Item');
+    const ItemAsset = require('../models/ItemAsset');
 
     const filter = {
       'items.lab_id': labId
     };
 
+    // Basic filters
     if (transaction_id) filter.transaction_id = transaction_id;
     if (reg_no) filter.student_reg_no = reg_no;
     if (faculty_email) filter.faculty_email = faculty_email;
     if (faculty_id) filter.faculty_id = faculty_id;
     if (status) filter.status = status;
 
-    const transactions = await Transaction.find(filter)
-      .populate('student_id', 'name reg_no email')
-      .populate('items.item_id', 'name sku tracking_type')
-      .populate('items.asset_ids', 'asset_tag') // 🔥 important
-      .populate('issued_by_incharge_id', 'name email')
-      .sort({ createdAt: -1 })
-      .lean();
+    // 🔍 Search by item name
+    if (item_name) {
+      const items = await Item.find({
+        name: new RegExp(item_name, 'i')
+      }).select('_id');
+
+      const itemIds = items.map(i => i._id);
+
+      if (itemIds.length === 0) {
+        return res.json({
+          success: true,
+          page: pageNum,
+          limit: limitNum,
+          totalItems: 0,
+          totalPages: 0,
+          count: 0,
+          data: []
+        });
+      }
+
+      filter['items.item_id'] = { $in: itemIds };
+    }
+
+    // 🔍 Search by asset tag
+    if (asset_tag) {
+      const assets = await ItemAsset.find({
+        asset_tag: new RegExp(asset_tag, 'i')
+      }).select('_id');
+
+      const assetIds = assets.map(a => a._id);
+
+      if (assetIds.length === 0) {
+        return res.json({
+          success: true,
+          page: pageNum,
+          limit: limitNum,
+          totalItems: 0,
+          totalPages: 0,
+          count: 0,
+          data: []
+        });
+      }
+
+      filter['items.asset_ids'] = { $in: assetIds };
+    }
+
+    // Run queries in parallel
+    const [totalItems, transactions] = await Promise.all([
+      Transaction.countDocuments(filter),
+      Transaction.find(filter)
+        .populate('student_id', 'name reg_no email')
+        .populate('items.item_id', 'name sku tracking_type')
+        .populate('items.asset_ids', 'asset_tag')
+        .populate('issued_by_incharge_id', 'name email')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limitNum)
+        .lean()
+    ]);
 
     const formatted = transactions.map(tx => ({
       ...tx,
@@ -769,6 +847,10 @@ exports.searchTransactions = async (req, res) => {
 
     return res.json({
       success: true,
+      page: pageNum,
+      limit: limitNum,
+      totalItems,
+      totalPages: Math.ceil(totalItems / limitNum),
       count: formatted.length,
       data: formatted
     });
@@ -884,9 +966,6 @@ exports.getItemById = async (req, res) => {
 };
 
 
-/* ======================================
-   LAB INCHARGE — GET ALL LAB SESSIONS (LAB SAFE)
-====================================== */
 exports.getLabSessions = async (req, res) => {
   try {
     const labId = req.user.lab_id;
@@ -898,18 +977,35 @@ exports.getLabSessions = async (req, res) => {
       });
     }
 
-    const records = await Transaction.find({
+    // Pagination params
+    const page = Math.max(parseInt(req.query.page) || 1, 1);
+    const limit = Math.min(parseInt(req.query.limit) || 25, 100);
+    const skip = (page - 1) * limit;
+
+    const baseFilter = {
       transaction_type: 'lab_session',
       'items.lab_id': labId
-    })
-      .populate('student_id', 'name reg_no email')
-      .populate('issued_by_incharge_id', 'name email')
-      .populate('items.item_id', 'name sku tracking_type')
-      .sort({ createdAt: -1 })
-      .lean();
+    };
+
+    // Parallel execution
+    const [totalItems, records] = await Promise.all([
+      Transaction.countDocuments(baseFilter),
+      Transaction.find(baseFilter)
+        .populate('student_id', 'name reg_no email')
+        .populate('issued_by_incharge_id', 'name email')
+        .populate('items.item_id', 'name sku tracking_type')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean()
+    ]);
 
     return res.json({
       success: true,
+      page,
+      limit,
+      totalItems,
+      totalPages: Math.ceil(totalItems / limit),
       count: records.length,
       data: records
     });
@@ -923,6 +1019,83 @@ exports.getLabSessions = async (req, res) => {
   }
 };
 
+
+exports.searchLabSessions = async (req, res) => {
+  try {
+    const labId = req.user.lab_id;
+
+    if (!labId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Lab access denied'
+      });
+    }
+
+    const {
+      search,
+      faculty_email,
+      faculty_id,
+      status,
+      page = 1,
+      limit = 25
+    } = req.query;
+
+    const pageNum = Math.max(parseInt(page), 1);
+    const limitNum = Math.min(parseInt(limit), 100);
+    const skip = (pageNum - 1) * limitNum;
+
+    const filter = {
+      transaction_type: 'lab_session',
+      'items.lab_id': labId
+    };
+
+    // 🔍 Generic search (ID, slot, faculty)
+    if (search) {
+      const regex = new RegExp(search, 'i');
+
+      filter.$or = [
+        { transaction_id: regex },
+        { lab_slot: regex },
+        { faculty_email: regex },
+        { faculty_id: regex }
+      ];
+    }
+
+    // Specific filters
+    if (faculty_email) filter.faculty_email = faculty_email;
+    if (faculty_id) filter.faculty_id = faculty_id;
+    if (status) filter.status = status;
+
+    const [totalItems, records] = await Promise.all([
+      Transaction.countDocuments(filter),
+      Transaction.find(filter)
+        .populate('student_id', 'name reg_no email')
+        .populate('issued_by_incharge_id', 'name email')
+        .populate('items.item_id', 'name sku tracking_type')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limitNum)
+        .lean()
+    ]);
+
+    return res.json({
+      success: true,
+      page: pageNum,
+      limit: limitNum,
+      totalItems,
+      totalPages: Math.ceil(totalItems / limitNum),
+      count: records.length,
+      data: records
+    });
+
+  } catch (err) {
+    console.error('SEARCH LAB SESSIONS ERROR:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to search lab sessions'
+    });
+  }
+};
 /* ======================================
    LAB INCHARGE — GET SINGLE LAB SESSION (LAB SAFE)
 ====================================== */
@@ -983,25 +1156,51 @@ exports.getLabTransfers = async (req, res) => {
       });
     }
 
-    const records = await Transaction.find({
+    // Pagination params
+    const page = Math.max(parseInt(req.query.page) || 1, 1);
+    const limit = Math.min(parseInt(req.query.limit) || 25, 100);
+    const skip = (page - 1) * limit;
+
+    const baseFilter = {
       transaction_type: 'lab_transfer',
       $or: [
-        { 'items.lab_id': labId },      // source lab
-        { target_lab_id: labId }        // target lab
+        { 'items.lab_id': labId },
+        { target_lab_id: labId }
       ]
-    })
-      .populate('student_id', 'name reg_no email')
-      .populate('items.item_id', 'name sku tracking_type')
-      .populate('items.lab_id', 'name code')
-      .populate('target_lab_id', 'name code')
-      .populate('issued_by_incharge_id', 'name email')
-      .sort({ createdAt: -1 })
-      .lean();
+    };
+
+    const [totalItems, records] = await Promise.all([
+      Transaction.countDocuments(baseFilter),
+      Transaction.find(baseFilter)
+        .populate('student_id', 'name reg_no email')
+        .populate('items.item_id', 'name sku tracking_type')
+        .populate('items.lab_id', 'name code')
+        .populate('items.asset_ids', 'asset_tag') // ✅ ADD THIS
+        .populate('target_lab_id', 'name code')
+        .populate('issued_by_incharge_id', 'name email')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean()
+    ]);
+
+    // ✅ Attach asset_tags (CONSISTENT FORMAT)
+    const formatted = records.map(t => ({
+      ...t,
+      items: t.items.map(i => ({
+        ...i,
+        asset_tags: i.asset_ids?.map(a => a.asset_tag) || []
+      }))
+    }));
 
     return res.json({
       success: true,
-      count: records.length,
-      data: records
+      page,
+      limit,
+      totalItems,
+      totalPages: Math.ceil(totalItems / limit),
+      count: formatted.length,
+      data: formatted
     });
 
   } catch (err) {
@@ -1012,6 +1211,96 @@ exports.getLabTransfers = async (req, res) => {
     });
   }
 };
+
+exports.searchLabTransfers = async (req, res) => {
+  try {
+    const labId = req.user.lab_id;
+
+    if (!labId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Lab access denied'
+      });
+    }
+
+    const {
+      search,
+      transfer_type,
+      status,
+      faculty_name,
+      page = 1,
+      limit = 25
+    } = req.query;
+
+    const pageNum = Math.max(parseInt(page), 1);
+    const limitNum = Math.min(parseInt(limit), 100);
+    const skip = (pageNum - 1) * limitNum;
+
+    const filter = {
+      transaction_type: 'lab_transfer',
+      $or: [
+        { 'items.lab_id': labId },
+        { target_lab_id: labId }
+      ]
+    };
+
+    // 🔍 Generic search
+    if (search) {
+      const regex = new RegExp(search, 'i');
+
+      filter.$and = [
+        {
+          $or: [
+            { transaction_id: regex },
+            { target_lab_name_snapshot: regex },
+            { handover_faculty_name: regex },
+            { faculty_email: regex }
+          ]
+        }
+      ];
+    }
+
+    // Filters
+    if (transfer_type) filter.transfer_type = transfer_type;
+    if (status) filter.status = status;
+
+    if (faculty_name) {
+      filter.handover_faculty_name = new RegExp(faculty_name, 'i');
+    }
+
+    const [totalItems, records] = await Promise.all([
+      Transaction.countDocuments(filter),
+      Transaction.find(filter)
+        .populate('student_id', 'name reg_no email')
+        .populate('items.item_id', 'name sku tracking_type')
+        .populate('items.lab_id', 'name code')
+        .populate('target_lab_id', 'name code')
+        .populate('issued_by_incharge_id', 'name email')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limitNum)
+        .lean()
+    ]);
+
+    return res.json({
+      success: true,
+      page: pageNum,
+      limit: limitNum,
+      totalItems,
+      totalPages: Math.ceil(totalItems / limitNum),
+      count: records.length,
+      data: records
+    });
+
+  } catch (err) {
+    console.error('SEARCH LAB TRANSFERS ERROR:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to search lab transfers'
+    });
+  }
+};
+
 /* ======================================
    LAB INCHARGE — GET SINGLE LAB TRANSFER (LAB SAFE)
 ====================================== */
@@ -1035,9 +1324,11 @@ exports.getLabTransferDetail = async (req, res) => {
       ]
     })
       .populate('student_id', 'name reg_no email')
+      .populate('source_lab_id', 'name code location')
+      .populate('target_lab_id', 'name code location')
       .populate('items.item_id', 'name sku tracking_type')
       .populate('items.lab_id', 'name code')
-      .populate('target_lab_id', 'name code')
+      .populate('items.asset_ids', 'asset_tag') // 🔥 SAME AS OUTGOING
       .populate('issued_by_incharge_id', 'name email')
       .lean();
 
@@ -1048,21 +1339,28 @@ exports.getLabTransferDetail = async (req, res) => {
       });
     }
 
+    // ✅ SAME FORMAT AS OUTGOING TRANSFERS
+    const formatted = {
+      ...record,
+      items: record.items.map(i => ({
+        ...i,
+        asset_tags: i.asset_ids?.map(a => a.asset_tag) || []
+      }))
+    };
+
     return res.json({
       success: true,
-      data: record
+      data: formatted
     });
 
   } catch (err) {
-    console.error('Get lab transfer detail error:', err);
+    console.error('GET LAB TRANSFER DETAIL ERROR:', err);
     return res.status(500).json({
       success: false,
       message: 'Failed to fetch lab transfer'
     });
   }
 };
-
-
 
 
 //feed back requests
