@@ -20,9 +20,6 @@ const s3 = require('../utils/s3');
 ========================= */
 
 /* ============================
-   ADD ITEM (FINAL – WITH RESERVED SUPPORT)
-============================ */
-/* ============================
    ADD ITEM (FINAL ENTERPRISE)
 ============================ */
 exports.addItem = async (req, res) => {
@@ -563,18 +560,38 @@ exports.getAllItems = async (req, res) => {
 
     const LabInventory = require('../models/LabInventory');
 
-    const inventories = await LabInventory.find({
-      lab_id: labId
-    })
-      .populate({
-        path: 'item_id',
-        match: { is_active: true },
-        select: 'name sku category description tracking_type is_student_visible'
-      })
-      .sort({ createdAt: -1 })
-      .lean();
+    const page = Math.max(parseInt(req.query.page) || 1, 1);
+    const limit = Math.min(parseInt(req.query.limit) || 25, 100);
+    const skip = (page - 1) * limit;
 
-    // Remove null items (if globally deactivated)
+    const search = req.query.search?.trim();
+
+    // Build match condition for populate
+    let itemMatch = { is_active: true };
+
+    if (search) {
+      const regex = new RegExp(search, 'i'); // NOT prefix, full contains search
+      itemMatch.$or = [
+        { name: regex },
+        { sku: regex },
+        { category: regex }
+      ];
+    }
+
+    const [totalItems, inventories] = await Promise.all([
+      LabInventory.countDocuments({ lab_id: labId }), // unchanged
+      LabInventory.find({ lab_id: labId })
+        .populate({
+          path: 'item_id',
+          match: itemMatch,
+          select: 'name sku category description tracking_type is_student_visible'
+        })
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean()
+    ]);
+
     const data = inventories
       .filter(inv => inv.item_id)
       .map(inv => ({
@@ -594,6 +611,10 @@ exports.getAllItems = async (req, res) => {
 
     return res.json({
       success: true,
+      page,
+      limit,
+      totalItems,
+      totalPages: Math.ceil(totalItems / limit),
       count: data.length,
       data
     });
@@ -605,7 +626,6 @@ exports.getAllItems = async (req, res) => {
     });
   }
 };
-
 
 /* ============================
    SEARCH ITEMS BY PREFIX
