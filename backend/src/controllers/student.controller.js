@@ -439,18 +439,13 @@ exports.getTransactionById = async (req, res) => {
   }
 };
 
-/* ============================
-   EXTEND RETURN DATE
-============================ */
 exports.extendReturnDate = async (req, res) => {
   try {
     const { transaction_id } = req.params;
     const { new_return_date } = req.body;
 
     if (!new_return_date) {
-      return res.status(400).json({
-        error: 'New return date is required'
-      });
+      return res.status(400).json({ error: 'New return date is required' });
     }
 
     const transaction = await Transaction.findOne({
@@ -459,56 +454,69 @@ exports.extendReturnDate = async (req, res) => {
     });
 
     if (!transaction) {
-      return res.status(404).json({
-        error: 'Transaction not found'
-      });
+      return res.status(404).json({ error: 'Transaction not found' });
     }
 
-    if (transaction.status !== 'active') {
+    // ✅ Allow active, overdue, partial_returned — all have items still out
+    if (!['active', 'overdue', 'partial_returned'].includes(transaction.status)) {
       return res.status(400).json({
-        error: 'Only active transactions can be extended'
+        error: 'Only active or overdue transactions can be extended'
       });
     }
 
-    if (!transaction.issued_at || transaction.actual_return_date) {
-      return res.status(400).json({
-        error: 'Transaction not eligible for extension'
-      });
+    if (!transaction.issued_at) {
+      return res.status(400).json({ error: 'Transaction not yet issued' });
     }
 
-    const issuedAt = new Date(transaction.issued_at);
+    const now = new Date();
     const requestedDate = new Date(new_return_date);
+    const issuedAt = new Date(transaction.issued_at);
 
-    if (requestedDate <= transaction.expected_return_date) {
+    // ✅ New date must be in the future
+    if (requestedDate <= now) {
       return res.status(400).json({
-        error: 'New return date must be later than current date'
+        error: 'New return date must be in the future'
       });
     }
 
+    // ✅ New date must be later than current expected return date
+    if (requestedDate <= new Date(transaction.expected_return_date)) {
+      return res.status(400).json({
+        error: 'New return date must be later than the current expected return date'
+      });
+    }
+
+    // ✅ Cannot exceed 2 months from issued_at
     const maxAllowedDate = new Date(issuedAt);
     maxAllowedDate.setMonth(maxAllowedDate.getMonth() + 2);
 
     if (requestedDate > maxAllowedDate) {
       return res.status(400).json({
-        error: 'Return date cannot exceed 2 months from issue date'
+        error: `Return date cannot exceed 2 months from issue date (max: ${maxAllowedDate.toDateString()})`
       });
     }
 
     transaction.expected_return_date = requestedDate;
+
+    // ✅ If transaction was overdue, revert to active since date is now extended
+    if (transaction.status === 'overdue') {
+      transaction.status = 'active';
+    }
+
     await transaction.save();
 
     return res.json({
       success: true,
-      new_expected_return_date: transaction.expected_return_date
+      message: 'Return date extended successfully',
+      new_expected_return_date: transaction.expected_return_date,
+      max_allowed_date: maxAllowedDate
     });
 
   } catch (err) {
-    return res.status(500).json({
-      error: 'Failed to extend return date'
-    });
+    console.error('Extend return date error:', err);
+    return res.status(500).json({ error: 'Failed to extend return date' });
   }
 };
-
 
 
 /* ============================

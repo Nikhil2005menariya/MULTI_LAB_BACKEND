@@ -9,40 +9,33 @@ const {
   returnTransaction,
   getActiveTransactions,
   getPendingTransactions,
-  getAvailableAssetsByItem
+  getAvailableAssetsByItem,
+  searchPendingTransactions,   // ✅ new
+  searchActiveTransactions,    // ✅ new
 } = require('../../controllers/assistant.controller');
-
-/* =====================================================
-   ASSISTANT TRANSACTION ROUTES
-   Base Path: /api/assistant/transactions
-===================================================== */
 
 // 🔐 Assistant only
 router.use(auth, role('assistant'));
 
 /* ============================
-   GET APPROVED TRANSACTIONS
+   STATIC ROUTES FIRST
+   (must be before /:transaction_id routes
+   to avoid param collision)
 ============================ */
-router.get('/pending', getPendingTransactions);
 
-/* ============================
-   GET ACTIVE TRANSACTIONS
-============================ */
-router.get('/active', getActiveTransactions);
+router.get('/pending',                getPendingTransactions);
+router.get('/pending/search',         searchPendingTransactions);  // ✅ new
 
-/* ============================
-   ISSUE TRANSACTION
-============================ */
-router.post('/:transaction_id/issue', issueTransaction);
+router.get('/active',                 getActiveTransactions);
+router.get('/active/search',          searchActiveTransactions);   // ✅ new
 
-/* ============================
-   RETURN TRANSACTION
-============================ */
-router.post('/:transaction_id/return', returnTransaction);
-
-/* ============================
-   GET AVAILABLE ASSETS
-============================ */
 router.get('/assets/:itemId/available', getAvailableAssetsByItem);
+
+/* ============================
+   PARAM ROUTES LAST
+============================ */
+
+router.post('/:transaction_id/issue',   issueTransaction);
+router.post('/:transaction_id/return',  returnTransaction);
 
 module.exports = router;
