@@ -1154,35 +1154,54 @@ exports.getLabTransferDetail = async (req, res) => {
 };
 
 /* ============================
-   COMPONENT REQUESTS
+   COMPONENT REQUESTS — GET ALL (paginated + search)
+   GET /api/admin/component-requests
+   ?search=&status=&urgency=&category=&page=&limit=
 ============================ */
 exports.getAllComponentRequests = async (req, res) => {
   try {
     const labId = req.user.lab_id;
     if (!labId) return res.status(403).json({ success: false, message: 'Lab access denied' });
 
-    const { status, urgency, category, student_reg_no, component_name } = req.query;
-    const page = Math.max(parseInt(req.query.page) || 1, 1);
+    const { search, status, urgency, category } = req.query;
+    const page  = Math.max(parseInt(req.query.page)  || 1,  1);
     const limit = Math.min(parseInt(req.query.limit) || 25, 100);
-    const skip = (page - 1) * limit;
+    const skip  = (page - 1) * limit;
 
     const filter = { lab_id: labId };
-    if (status)         filter.status = status;
-    if (urgency)        filter.urgency = urgency;
-    if (category)       filter.category = category;
-    if (student_reg_no) filter.student_reg_no = student_reg_no;
-    if (component_name) filter.component_name = new RegExp(component_name, 'i');
+
+    /* Exact filters */
+    if (status)   filter.status   = status;
+    if (urgency)  filter.urgency  = urgency;
+    if (category) filter.category = new RegExp(category, 'i');
+
+    /* Unified search — prefix match across component name, category, student reg no */
+    if (search && search.trim()) {
+      const regex = new RegExp(search.trim(), 'i');
+      filter.$or = [
+        { component_name:   regex },
+        { category:         regex },
+        { student_reg_no:   regex },
+        { student_email:    regex }
+      ];
+    }
 
     const [totalItems, requests] = await Promise.all([
       ComponentRequest.countDocuments(filter),
       ComponentRequest.find(filter)
         .populate('student_id', 'name reg_no email')
-        .sort({ createdAt: -1 }).skip(skip).limit(limit).lean()
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean()
     ]);
 
     return res.json({
-      success: true, page, limit, totalItems,
-      totalPages: Math.ceil(totalItems / limit), count: requests.length, data: requests
+      success: true, page, limit,
+      totalItems,
+      totalPages: Math.ceil(totalItems / limit),
+      count: requests.length,
+      data: requests
     });
 
   } catch (err) {
@@ -1346,59 +1365,273 @@ exports.downloadBill = async (req, res) => {
 /* ============================
    DAMAGED ASSET HISTORY
 ============================ */
+/* =====================================================
+   DAMAGED ASSETS CONTROLLERS
+   Add these to admin.controller.js
+===================================================== */
+
+/* ============================
+   1. DAMAGED ASSET HISTORY (FILTERABLE + PAGINATED)
+   GET /api/admin/damaged-assets/history
+   ?status=&item=&vendor=&from=&to=&page=&limit=
+============================ */
 exports.getDamagedAssetHistory = async (req, res) => {
   try {
     const labId = req.user.lab_id;
     if (!labId) return res.status(403).json({ success: false, message: 'Lab access denied' });
 
     const { item, vendor, status, from, to } = req.query;
-    const matchStage = {};
+    const page  = Math.max(parseInt(req.query.page)  || 1,  1);
+    const limit = Math.min(parseInt(req.query.limit) || 25, 100);
+    const skip  = (page - 1) * limit;
 
-    if (status) matchStage.status = status;
-    if (from || to) {
-      matchStage.reported_at = {};
-      if (from) matchStage.reported_at.$gte = new Date(from);
-      if (to)   matchStage.reported_at.$lte = new Date(to);
-    }
-
+    /* ── Build pipeline ── */
     const pipeline = [
-      { $match: matchStage },
-      { $lookup: { from: 'itemassets', localField: 'asset_id', foreignField: '_id', as: 'asset' } },
-      { $unwind: '$asset' },
-      { $match: { 'asset.lab_id': labId } },
-      { $lookup: { from: 'items', localField: 'asset.item_id', foreignField: '_id', as: 'item' } },
-      { $unwind: '$item' }
-    ];
 
-    if (item) pipeline.push({ $match: { 'item.name': { $regex: item, $options: 'i' } } });
-    if (vendor) pipeline.push({ $match: { 'asset.vendor': { $regex: vendor, $options: 'i' } } });
-
-    pipeline.push(
+      /* Join asset — must belong to this lab */
       {
-        $project: {
-          _id: 1,
-          asset_tag: '$asset.asset_tag', serial_no: '$asset.serial_no',
-          asset_status: '$asset.status', asset_condition: '$asset.condition',
-          vendor: '$asset.vendor', item_name: '$item.name',
-          sku: '$item.sku', category: '$item.category',
-          damage_status: '$status', damage_reason: '$damage_reason',
-          remarks: '$remarks', reported_at: 1,
-          faculty_email: 1, faculty_id: 1, student_id: 1
+        $lookup: {
+          from: 'itemassets',
+          localField: 'asset_id',
+          foreignField: '_id',
+          as: 'asset'
         }
       },
-      { $sort: { reported_at: -1 } }
-    );
+      { $unwind: '$asset' },
+      { $match: { 'asset.lab_id': new mongoose.Types.ObjectId(labId) } },
 
-    const records = await DamagedAssetLog.aggregate(pipeline);
+      /* Join item */
+      {
+        $lookup: {
+          from: 'items',
+          localField: 'asset.item_id',
+          foreignField: '_id',
+          as: 'item'
+        }
+      },
+      { $unwind: '$item' },
 
-    return res.json({ success: true, count: records.length, data: records });
+      /* Filters */
+      ...(status ? [{ $match: { status } }] : []),
+      ...(from || to
+        ? [{
+            $match: {
+              reported_at: {
+                ...(from ? { $gte: new Date(from) } : {}),
+                ...(to   ? { $lte: new Date(to)   } : {})
+              }
+            }
+          }]
+        : []),
+      ...(vendor ? [{ $match: { 'asset.vendor': new RegExp(vendor, 'i') } }] : []),
+      ...(item   ? [{ $match: { 'item.name':    new RegExp(item,   'i') } }] : []),
+
+      { $sort: { reported_at: -1 } },
+
+      /* Paginate + count in one pass */
+      {
+        $facet: {
+          metadata: [{ $count: 'total' }],
+          data: [
+            { $skip: skip },
+            { $limit: limit },
+            {
+              $project: {
+                _id: 0,
+                log_id:          '$_id',
+                asset_tag:       '$asset.asset_tag',
+                serial_no:       '$asset.serial_no',
+                asset_status:    '$asset.status',
+                asset_condition: '$asset.condition',
+                vendor:          '$asset.vendor',
+                item_name:       '$item.name',
+                sku:             '$item.sku',
+                category:        '$item.category',
+                damage_status:   '$status',
+                damage_reason:   1,
+                remarks:         1,
+                faculty_email:   1,
+                faculty_id:      1,
+                student_id:      1,
+                reported_at:     1
+              }
+            }
+          ]
+        }
+      }
+    ];
+
+    const result = await DamagedAssetLog.aggregate(pipeline);
+    const totalItems = result[0]?.metadata[0]?.total || 0;
+    const data       = result[0]?.data || [];
+
+    return res.json({
+      success: true,
+      page, limit,
+      totalItems,
+      totalPages: Math.ceil(totalItems / limit),
+      count: data.length,
+      data
+    });
 
   } catch (error) {
-    console.error('Damaged asset history error:', error);
+    console.error('Error fetching damaged asset history:', error);
     return res.status(500).json({ success: false, message: 'Failed to fetch damaged asset history' });
   }
 };
 
+/* ============================
+   2. CURRENT DAMAGED / UNDER-REPAIR (SUMMARY)
+   GET /api/admin/damaged-assets
+============================ */
+exports.getCurrentDamagedAssets = async (req, res) => {
+  try {
+    const labId = req.user.lab_id;
+    if (!labId) return res.status(403).json({ success: false, message: 'Lab access denied' });
+
+    const records = await DamagedAssetLog.find({ status: { $in: ['damaged', 'under_repair'] } })
+      .populate({
+        path: 'asset_id',
+        match: { lab_id: labId },
+        populate: { path: 'item_id' }
+      })
+      .populate('student_id', 'name reg_no email')
+      .sort({ reported_at: -1 })
+      .lean();
+
+    const data = records.filter(r => r.asset_id);
+
+    return res.json({ success: true, count: data.length, data });
+
+  } catch (error) {
+    console.error('Error fetching damaged assets:', error);
+    return res.status(500).json({ success: false, message: 'Failed to fetch damaged assets' });
+  }
+};
+
+/* ============================
+   3. UNDER-REPAIR LIST
+   GET /api/admin/damaged-assets/under-repair/list
+============================ */
+exports.getUnderRepairAssets = async (req, res) => {
+  try {
+    const labId = req.user.lab_id;
+    if (!labId) return res.status(403).json({ success: false, message: 'Lab access denied' });
+
+    const assets = await ItemAsset.find({ lab_id: labId, status: 'damaged', condition: 'faulty' })
+      .populate('item_id')
+      .sort({ updatedAt: -1 })
+      .lean();
+
+    return res.json({ success: true, count: assets.length, data: assets });
+
+  } catch (error) {
+    console.error('Error fetching under-repair assets:', error);
+    return res.status(500).json({ success: false, message: 'Failed to fetch under-repair assets' });
+  }
+};
+
+/* ============================
+   4. UPDATE DAMAGE STATUS
+   PATCH /api/admin/damaged-assets/:id/status
+============================ */
+exports.updateDamageStatus = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const labId = req.user.lab_id;
+    const { action } = req.body;
+
+    if (!labId) throw new Error('Lab access denied');
+    if (!['repair', 'resolve', 'retire'].includes(action)) throw new Error('Invalid action');
+
+    const record = await DamagedAssetLog.findById(req.params.id).session(session);
+    if (!record) throw new Error('Damage record not found');
+
+    const asset = await ItemAsset.findById(record.asset_id).session(session);
+    if (!asset) throw new Error('Asset not found');
+
+    if (String(asset.lab_id) !== String(labId)) throw new Error('Unauthorized lab access');
+
+    const inventory = await LabInventory.findOne({
+      lab_id: asset.lab_id,
+      item_id: asset.item_id
+    }).session(session);
+
+    if (!inventory) throw new Error('Lab inventory not found');
+
+    switch (action) {
+      case 'repair':
+        asset.status    = 'damaged';
+        asset.condition = 'faulty';
+        record.status   = 'under_repair';
+        break;
+
+      case 'resolve':
+        asset.status    = 'available';
+        asset.condition = 'good';
+        record.status   = 'resolved';
+        break;
+
+      case 'retire':
+        asset.status    = 'retired';
+        asset.condition = 'broken';
+        record.status   = 'retired';
+        inventory.total_quantity = Math.max(0, inventory.total_quantity - 1);
+        break;
+    }
+
+    await asset.save({ session });
+    await record.save({ session });
+
+    const [availableCount, damagedCount] = await Promise.all([
+      ItemAsset.countDocuments({ lab_id: asset.lab_id, item_id: asset.item_id, status: 'available' }).session(session),
+      ItemAsset.countDocuments({ lab_id: asset.lab_id, item_id: asset.item_id, status: 'damaged'   }).session(session)
+    ]);
+
+    inventory.available_quantity = availableCount;
+    inventory.damaged_quantity   = damagedCount;
+    await inventory.save({ session });
+
+    await session.commitTransaction();
+    session.endSession();
+
+    return res.json({ success: true, message: `Asset status updated via action: ${action}` });
+
+  } catch (error) {
+    await session.abortTransaction();
+    session.endSession();
+    console.error('Error updating damaged asset status:', error);
+    return res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+/* ============================
+   5. SINGLE DAMAGE RECORD DETAIL
+   GET /api/admin/damaged-assets/:id
+   ❗ Register this route LAST in the router
+============================ */
+exports.getDamagedAssetDetail = async (req, res) => {
+  try {
+    const record = await DamagedAssetLog.findById(req.params.id)
+      .populate({
+        path: 'asset_id',
+        populate: { path: 'item_id', select: 'name category sku vendor' }
+      })
+      .populate('transaction_id', 'transaction_id faculty_email faculty_id issued_at actual_return_date status')
+      .populate('student_id', 'name reg_no email')
+      .lean();
+
+    if (!record) return res.status(404).json({ success: false, message: 'Damaged asset record not found' });
+
+    return res.json({ success: true, data: record });
+
+  } catch (error) {
+    console.error('Error fetching damaged asset details:', error);
+    return res.status(500).json({ success: false, message: 'Failed to fetch damaged asset details' });
+  }
+};
 /* ============================
    LAB TRANSFER ROUTES
 ============================ */
@@ -1416,21 +1649,103 @@ exports.getLabAvailableItems = async (req, res) => {
   try {
     const { labId } = req.params;
 
-    const inventory = await LabInventory.find({ lab_id: labId })
-      .populate('item_id', 'name sku tracking_type is_student_visible').lean();
+    const page  = Math.max(parseInt(req.query.page)  || 1,  1);
+    const limit = Math.min(parseInt(req.query.limit) || 25, 100);
+    const skip  = (page - 1) * limit;
+    const search = (req.query.search || '').trim();
 
-    const filtered = inventory
-      .map(inv => ({
-        ...inv,
-        available_quantity: inv.total_quantity - (inv.reserved_quantity || 0)
-      }))
-      .filter(inv => inv.available_quantity > 0);
+    const searchMatch = search
+      ? {
+          $or: [
+            { 'item.name':     new RegExp(`^${search}`, 'i') },
+            { 'item.sku':      new RegExp(`^${search}`, 'i') },
+            { 'item.category': new RegExp(`^${search}`, 'i') },
+            { 'item.tracking_type': new RegExp(`^${search}`, 'i') }
+          ]
+        }
+      : null;
 
-    res.json({ success: true, count: filtered.length, data: filtered });
+    const result = await LabInventory.aggregate([
+
+      /* Match this lab's inventory */
+      { $match: { lab_id: new mongoose.Types.ObjectId(labId) } },
+
+      /* Join item */
+      {
+        $lookup: {
+          from: 'items',
+          localField: 'item_id',
+          foreignField: '_id',
+          as: 'item'
+        }
+      },
+      { $unwind: '$item' },
+
+      /* Only active items */
+      { $match: { 'item.is_active': true } },
+
+      /* Optional search */
+      ...(searchMatch ? [{ $match: searchMatch }] : []),
+
+      /* Compute available quantity */
+      {
+        $addFields: {
+          available_quantity: {
+            $subtract: [
+              '$total_quantity',
+              { $ifNull: ['$reserved_quantity', 0] }
+            ]
+          }
+        }
+      },
+
+      /* Only items with stock */
+      { $match: { available_quantity: { $gt: 0 } } },
+
+      /* Shape output */
+      {
+        $project: {
+          _id: 1,
+          lab_id: 1,
+          item_id: '$item._id',
+          name:          '$item.name',
+          sku:           '$item.sku',
+          category:      '$item.category',
+          tracking_type: '$item.tracking_type',
+          is_student_visible: '$item.is_student_visible',
+          total_quantity:    1,
+          available_quantity: 1,
+          reserved_quantity:  { $ifNull: ['$reserved_quantity', 0] },
+          temp_reserved_quantity: { $ifNull: ['$temp_reserved_quantity', 0] }
+        }
+      },
+
+      { $sort: { name: 1 } },
+
+      {
+        $facet: {
+          data: [{ $skip: skip }, { $limit: limit }],
+          totalCount: [{ $count: 'count' }]
+        }
+      }
+    ]);
+
+    const data       = result[0]?.data || [];
+    const totalItems = result[0]?.totalCount[0]?.count || 0;
+
+    return res.json({
+      success: true,
+      page,
+      limit,
+      totalItems,
+      totalPages: Math.ceil(totalItems / limit),
+      count: data.length,
+      data
+    });
 
   } catch (err) {
     console.error('GET LAB AVAILABLE ITEMS ERROR:', err);
-    res.status(500).json({ success: false, message: 'Failed to fetch items' });
+    return res.status(500).json({ success: false, message: 'Failed to fetch items' });
   }
 };
 

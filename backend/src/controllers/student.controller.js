@@ -43,6 +43,24 @@ exports.getAllItems = async (req, res) => {
         }
       },
 
+      /* 🔥 LOOKUP LAB FIRST */
+      {
+        $lookup: {
+          from: 'labs',
+          localField: 'lab_id',
+          foreignField: '_id',
+          as: 'lab'
+        }
+      },
+      { $unwind: '$lab' },
+
+      /* 🔥 FILTER OUT INACTIVE LABS */
+      {
+        $match: {
+          'lab.is_active': true
+        }
+      },
+
       {
         $lookup: {
           from: 'items',
@@ -178,6 +196,13 @@ exports.getItemLabs = async (req, res) => {
       },
 
       { $unwind: '$lab_id' },
+
+      /* 🔥 FILTER OUT INACTIVE LABS */
+      {
+        $match: {
+          'lab_id.is_active': true
+        }
+      },
 
       {
         $project: {

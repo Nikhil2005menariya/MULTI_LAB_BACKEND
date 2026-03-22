@@ -21,7 +21,6 @@ router.use('/items', itemRoutes);
 router.use('/transactions', transactionRoutes);
 router.use('/overdue', overdueRoutes);
 router.use('/damaged-assets', damagedAssetsRoutes);
-router.use('/damaged-assets', require('./damagedAssetHistory.routes'));
 router.use('/profile', profileRoutes);
 router.use('/lab-transactions', labTransactionRoutes);
 router.use('/component-requests', componentrequest);
