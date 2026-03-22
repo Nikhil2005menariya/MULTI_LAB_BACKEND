@@ -428,27 +428,16 @@ exports.activateLab = async (req, res) => {
 exports.addAssistant = async (req, res) => {
   try {
     const { labId } = req.params;
-    const { name, email, password } = req.body;
+    const { name, email } = req.body;
+
+    if (!name || !email) {
+      return res.status(400).json({ error: 'Name and email are required' });
+    }
 
     const lab = await validateLab(labId);
-    if (!lab) {
-      return res.status(404).json({ error: 'Invalid lab' });
-    }
+    if (!lab) return res.status(404).json({ error: 'Invalid lab' });
 
-    const existing = await Staff.findOne({ email });
-    if (existing) {
-      return res.status(400).json({ error: 'Email already exists' });
-    }
-
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    const assistant = await Staff.create({
-      name,
-      email: email.toLowerCase(),
-      password: hashedPassword,
-      role: 'assistant',
-      lab_id: labId
-    });
+    const { staff, isNew } = await assignOrCreateStaff({ name, email, role: 'assistant', labId, lab });
 
     return res.status(isNew ? 201 : 200).json({
       success: true, isNew,
@@ -492,14 +481,16 @@ exports.removeAssistant = async (req, res) => {
 exports.changeIncharge = async (req, res) => {
   try {
     const { labId } = req.params;
-    const { name, email, password } = req.body;
+    const { name, email } = req.body;
 
-    const lab = await validateLab(labId);
-    if (!lab) {
-      return res.status(404).json({ error: 'Invalid lab' });
+    if (!name || !email) {
+      return res.status(400).json({ error: 'Name and email are required' });
     }
 
-    // Remove existing incharge (if exists)
+    const lab = await validateLab(labId);
+    if (!lab) return res.status(404).json({ error: 'Invalid lab' });
+
+    // Deactivate current incharge
     await Staff.updateMany(
       { lab_id: labId, role: 'incharge' },
       { $set: { is_active: false, lab_id: null } }
@@ -567,27 +558,195 @@ exports.getCurrentIncharge = async (req, res) => {
 ===================================================== */
 
 /* ============================
-   ANALYTICS - TRANSACTIONS (ENHANCED)
+   1. OVERVIEW DASHBOARD
+   GET /super-admin/analytics/overview?labId=&startDate=&endDate=
 ============================ */
+exports.getAnalyticsOverview = async (req, res) => {
+  try {
+    const { labId, startDate, endDate } = req.query;
+    const labFilter = labId ? { 'items.lab_id': new mongoose.Types.ObjectId(labId) } : {};
+    const dateFilter = dateRangeMatch(startDate, endDate);
+    const txMatch = { ...labFilter, ...dateFilter };
+    const inventoryMatch = labId ? { lab_id: new mongoose.Types.ObjectId(labId) } : {};
 
-exports.getTransactionAnalytics = async (req, res) => {
+    /* Status breakdown */
+    const statusBreakdown = await Transaction.aggregate([
+      { $match: txMatch },
+      { $group: { _id: '$status', count: { $sum: 1 } } },
+      { $sort: { count: -1 } }
+    ]);
+
+    /* Transaction type breakdown */
+    const typeBreakdown = await Transaction.aggregate([
+      { $match: txMatch },
+      { $group: { _id: '$transaction_type', count: { $sum: 1 } } }
+    ]);
+
+    /* Monthly trend — last 6 months */
+    const sixMonthsAgo = new Date();
+    sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+
+    const monthlyTrend = await Transaction.aggregate([
+      { $match: { ...labFilter, createdAt: { $gte: sixMonthsAgo } } },
+      {
+        $group: {
+          _id: { year: { $year: '$createdAt' }, month: { $month: '$createdAt' } },
+          total: { $sum: 1 },
+          active: { $sum: { $cond: [{ $eq: ['$status', 'active'] }, 1, 0] } },
+          completed: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
+          overdue: { $sum: { $cond: [{ $eq: ['$status', 'overdue'] }, 1, 0] } }
+        }
+      },
+      { $sort: { '_id.year': 1, '_id.month': 1 } },
+      {
+        $project: {
+          _id: 0,
+          month: {
+            $concat: [
+              { $toString: '$_id.year' }, '-',
+              { $cond: [{ $lt: ['$_id.month', 10] }, { $concat: ['0', { $toString: '$_id.month' }] }, { $toString: '$_id.month' }] }
+            ]
+          },
+          total: 1, active: 1, completed: 1, overdue: 1
+        }
+      }
+    ]);
+
+    /* Inventory health per lab */
+    const inventoryHealth = await LabInventory.aggregate([
+      { $match: inventoryMatch },
+      {
+        $group: {
+          _id: '$lab_id',
+          total_items: { $sum: 1 },
+          total_qty: { $sum: '$total_quantity' },
+          available_qty: { $sum: '$available_quantity' },
+          reserved_qty: { $sum: { $ifNull: ['$reserved_quantity', 0] } },
+          temp_reserved_qty: { $sum: { $ifNull: ['$temp_reserved_quantity', 0] } }
+        }
+      },
+      { $lookup: { from: 'labs', localField: '_id', foreignField: '_id', as: 'lab' } },
+      { $unwind: { path: '$lab', preserveNullAndEmptyArrays: true } },
+      {
+        $project: {
+          _id: 0, lab_id: '$_id',
+          lab_name: '$lab.name', lab_code: '$lab.code',
+          total_items: 1, total_qty: 1, available_qty: 1,
+          reserved_qty: 1, temp_reserved_qty: 1,
+          // issued_qty = total - available (available already subtracts reserved)
+          issued_qty: { $subtract: ['$total_qty', '$available_qty'] },
+          utilization_pct: {
+            $cond: [
+              { $gt: ['$total_qty', 0] },
+              {
+                $round: [{
+                  $multiply: [{
+                    $divide: [
+                      { $subtract: ['$total_qty', '$available_qty'] },
+                      '$total_qty'
+                    ]
+                  }, 100]
+                }, 1]
+              },
+              0
+            ]
+          }
+        }
+      },
+      { $sort: { utilization_pct: -1 } }
+    ]);
+
+    /* Top 10 most borrowed items */
+    const topBorrowedItems = await Transaction.aggregate([
+      { $match: txMatch },
+      { $unwind: '$items' },
+      ...(labId ? [{ $match: { 'items.lab_id': new mongoose.Types.ObjectId(labId) } }] : []),
+      {
+        $group: {
+          _id: '$items.item_id',
+          borrow_count: { $sum: 1 },
+          total_qty_issued: { $sum: { $ifNull: ['$items.issued_quantity', 0] } }
+        }
+      },
+      { $sort: { borrow_count: -1 } },
+      { $limit: 10 },
+      { $lookup: { from: 'items', localField: '_id', foreignField: '_id', as: 'item' } },
+      { $unwind: { path: '$item', preserveNullAndEmptyArrays: true } },
+      {
+        $project: {
+          _id: 0, item_id: '$_id',
+          name: '$item.name', sku: '$item.sku',
+          category: '$item.category', tracking_type: '$item.tracking_type',
+          borrow_count: 1, total_qty_issued: 1
+        }
+      }
+    ]);
+
+    /* Overdue count */
+    const now = new Date();
+    const overdueCount = await Transaction.countDocuments({
+      ...labFilter,
+      status: { $in: ['overdue', 'active', 'partial_returned'] },
+      expected_return_date: { $lt: now }
+    });
+
+    /* Damage summary */
+    const damageSummary = await ItemAsset.aggregate([
+      { $match: { ...inventoryMatch, condition: { $ne: 'good' } } },
+      { $group: { _id: '$condition', count: { $sum: 1 } } }
+    ]);
+
+    /* Summary counts */
+    const [totalTransactions, totalLabs, totalItems, totalStaff, activeCount] = await Promise.all([
+      Transaction.countDocuments(txMatch),
+      labId ? 1 : Lab.countDocuments({ is_active: true }),
+      LabInventory.countDocuments(inventoryMatch),
+      Staff.countDocuments({
+        is_active: true,
+        role: { $in: ['incharge', 'assistant'] },
+        ...(labId ? { lab_id: new mongoose.Types.ObjectId(labId) } : {})
+      }),
+      Transaction.countDocuments({ ...labFilter, status: 'active' })
+    ]);
+
+    return res.json({
+      success: true,
+      data: {
+        summary: {
+          total_transactions: totalTransactions,
+          total_labs: totalLabs,
+          total_items: totalItems,
+          overdue_count: overdueCount,
+          total_staff: totalStaff,
+          active_count: activeCount
+        },
+        status_breakdown: statusBreakdown.map(s => ({ status: s._id || 'unknown', count: s.count })),
+        type_breakdown: typeBreakdown.map(t => ({ type: t._id || 'unknown', count: t.count })),
+        monthly_trend: monthlyTrend,
+        inventory_health: inventoryHealth,
+        top_borrowed_items: topBorrowedItems.filter(i => i.name),
+        damage_summary: damageSummary.map(d => ({ condition: d._id, count: d.count }))
+      }
+    });
+
+  } catch (err) {
+    console.error('Analytics overview error:', err);
+    return res.status(500).json({ error: 'Failed to fetch analytics overview' });
+  }
+};
+
+/* ============================
+   2. TRANSACTION REPORT
+   POST /super-admin/analytics/transactions
+   Paginated + CSV export
+============================ */
+exports.getTransactionReport = async (req, res) => {
   try {
     const {
-      fields,
-      startDate,
-      endDate,
-      labId,
-      filters,
-      format,
-      page = 1,
-      limit = 50,
-      sortBy = 'createdAt',
-      order = -1
+      fields, startDate, endDate, labId,
+      status, transaction_type, student_reg_no, faculty_email,
+      format, page = 1, limit = 50
     } = req.body;
-
-    if (!Array.isArray(fields) || fields.length === 0) {
-      return res.status(400).json({ error: 'Fields array is required' });
-    }
 
     const allowedFields = [
       'transaction_id', 'project_name', 'transaction_type', 'status',
@@ -604,257 +763,89 @@ exports.getTransactionAnalytics = async (req, res) => {
       return res.status(400).json({ error: 'No valid fields selected' });
     }
 
-    /* ============================
-       FILTER BUILDING
-    ============================= */
+    const pageNum = Math.max(parseInt(page), 1);
+    const limitNum = Math.min(parseInt(limit), 200);
+    const skip = (pageNum - 1) * limitNum;
 
-    const txnMatch = {};
-    const itemMatch = {};
+    const matchStage = {};
+    if (startDate || endDate) Object.assign(matchStage, dateRangeMatch(startDate, endDate));
+    if (status)           matchStage.status = status;
+    if (transaction_type) matchStage.transaction_type = transaction_type;
+    if (student_reg_no)   matchStage.student_reg_no = new RegExp(student_reg_no, 'i');
+    if (faculty_email)    matchStage.faculty_email = new RegExp(faculty_email, 'i');
 
-    // Date filter
-    if (startDate || endDate) {
-      txnMatch.createdAt = {};
+    const pipeline = [];
+    if (Object.keys(matchStage).length > 0) pipeline.push({ $match: matchStage });
+    pipeline.push({ $unwind: '$items' });
+    if (labId) pipeline.push({ $match: { 'items.lab_id': new mongoose.Types.ObjectId(labId) } });
+    pipeline.push(
+      { $group: { _id: '$_id', doc: { $first: '$$ROOT' } } },
+      { $replaceRoot: { newRoot: '$doc' } }
+    );
 
-      if (startDate) {
-        const start = new Date(startDate);
-        start.setHours(0, 0, 0, 0);
-        txnMatch.createdAt.$gte = start;
-      }
-
-      if (endDate) {
-        const end = new Date(endDate);
-        end.setHours(23, 59, 59, 999);
-        txnMatch.createdAt.$lte = end;
-      }
-    }
-
-    // Lab filter (item level)
-    if (labId) {
-      itemMatch['items.lab_id'] = new mongoose.Types.ObjectId(labId);
-    }
-
-    if (filters && typeof filters === 'object') {
-      Object.entries(filters).forEach(([key, value]) => {
-        if (!allowedFields.includes(key)) return;
-
-        if (key === 'student_id') {
-          txnMatch[key] = new mongoose.Types.ObjectId(value);
-        } else {
-          txnMatch[key] = value;
-        }
-      });
-    }
-
-    /* ============================
-       BASE PIPELINE
-    ============================= */
-
-    const basePipeline = [
-      { $match: txnMatch },
-      { $unwind: '$items' },
-      ...(Object.keys(itemMatch).length ? [{ $match: itemMatch }] : [])
-    ];
-
-    /* ============================
-       SUMMARY PIPELINE
-    ============================= */
-
-    const summaryPipeline = [
-      ...basePipeline,
-      {
-        $group: {
-          _id: null,
-          total_transactions: { $addToSet: '$_id' },
-          total_issued: { $sum: '$items.issued_quantity' },
-          total_returned: { $sum: '$items.returned_quantity' },
-          total_damaged: { $sum: '$items.damaged_quantity' }
-        }
-      },
-      {
-        $project: {
-          total_transactions: { $size: '$total_transactions' },
-          total_issued: 1,
-          total_returned: 1,
-          total_damaged: 1
-        }
-      }
-    ];
-
-    /* ============================
-       TOP ITEMS
-    ============================= */
-
-    const topItemsPipeline = [
-      ...basePipeline,
-      {
-        $group: {
-          _id: '$items.item_id',
-          issued: { $sum: '$items.issued_quantity' }
-        }
-      },
-      { $sort: { issued: -1 } },
-      { $limit: 5 }
-    ];
-
-    /* ============================
-       TOP LABS
-    ============================= */
-
-    const topLabsPipeline = [
-      ...basePipeline,
-      {
-        $group: {
-          _id: '$items.lab_id',
-          issued: { $sum: '$items.issued_quantity' }
-        }
-      },
-      { $sort: { issued: -1 } },
-      { $limit: 5 }
-    ];
-
-    /* ============================
-       MAIN DATA PIPELINE
-    ============================= */
-
-    const dataPipeline = [
-      ...basePipeline,
-      {
-        $group: {
-          _id: '$_id',
-          doc: { $first: '$$ROOT' }
-        }
-      },
-      { $replaceRoot: { newRoot: '$doc' } },
-      {
-        $project: selectedFields.reduce((acc, f) => {
-          acc[f] = 1;
-          return acc;
-        }, {})
-      },
-      { $sort: { [sortBy]: order } },
-      { $skip: (page - 1) * limit },
-      { $limit: limit }
-    ];
-
-    /* ============================
-       EXECUTE IN PARALLEL
-    ============================= */
-
-    const [summary, topItems, topLabs, transactions] =
-      await Promise.all([
-        Transaction.aggregate(summaryPipeline),
-        Transaction.aggregate(topItemsPipeline),
-        Transaction.aggregate(topLabsPipeline),
-        Transaction.aggregate(dataPipeline)
-      ]);
-
-    /* ============================
-       CSV EXPORT
-    ============================= */
+    const projectStage = { _id: 0 };
+    selectedFields.forEach(f => { projectStage[f] = 1; });
+    pipeline.push({ $project: projectStage });
+    pipeline.push({ $sort: { createdAt: -1 } });
 
     if (format === 'csv') {
       pipeline.push({ $limit: 5000 });
       const transactions = await Transaction.aggregate(pipeline);
       const header = selectedFields.join(',');
       const rows = transactions.map(txn =>
-        selectedFields
-          .map(field => {
-            const value = txn[field] ?? '';
-            const safe = String(value)
-              .replace(/"/g, '""')
-              .replace(/\n/g, ' ');
-            return `"${safe}"`;
-          })
-          .join(',')
+        selectedFields.map(field => {
+          const val = txn[field] ?? '';
+          const str = val instanceof Date ? val.toISOString() : String(val);
+          return `"${str.replace(/"/g, '""')}"`;
+        }).join(',')
       );
       res.setHeader('Content-Disposition', 'attachment; filename=transaction_report.csv');
       res.setHeader('Content-Type', 'text/csv');
       return res.send([header, ...rows].join('\n'));
     }
 
-    /* ============================
-       RESPONSE
-    ============================= */
+    // Paginated JSON
+    const countPipeline = [...pipeline.slice(0, pipeline.length - 1), { $count: 'total' }];
+    const [countResult, transactions] = await Promise.all([
+      Transaction.aggregate(countPipeline),
+      Transaction.aggregate([...pipeline, { $skip: skip }, { $limit: limitNum }])
+    ]);
+
+    const total = countResult[0]?.total || 0;
 
     return res.json({
       success: true,
-      page,
-      limit,
-      count: transactions.length,
-
-      summary: summary[0] || {
-        total_transactions: 0,
-        total_issued: 0,
-        total_returned: 0,
-        total_damaged: 0
-      },
-
-      top_items: topItems,
-      top_labs: topLabs,
-
-      data: transactions
+      page: pageNum, limit: limitNum,
+      totalItems: total, totalPages: Math.ceil(total / limitNum),
+      count: transactions.length, data: transactions
     });
 
   } catch (err) {
-    console.error('Transaction analytics error:', err);
-    return res.status(500).json({
-      error: 'Failed to fetch transaction analytics'
-    });
+    console.error('Transaction report error:', err);
+    return res.status(500).json({ error: 'Failed to fetch transaction report' });
   }
 };
 
-
 /* ============================
-   ITEM ANALYTICS (ENHANCED)
+   3. ITEM USAGE REPORT
+   POST /super-admin/analytics/items
+   Paginated + borrow stats + asset condition
 ============================ */
 exports.getItemReport = async (req, res) => {
   try {
-    const {
-      startDate,
-      endDate,
-      labId,
-      page = 1,
-      limit = 50
-    } = req.body;
+    const { startDate, endDate, labId, category, tracking_type, page = 1, limit = 50 } = req.body;
 
-    /* ============================
-       FILTER BUILDING
-    ============================= */
+    const pageNum = Math.max(parseInt(page), 1);
+    const limitNum = Math.min(parseInt(limit), 200);
+    const skip = (pageNum - 1) * limitNum;
 
-    const txnMatch = {};
-
-    if (startDate || endDate) {
-      txnMatch.createdAt = {};
-
-      if (startDate) {
-        const start = new Date(startDate);
-        start.setHours(0, 0, 0, 0);
-        txnMatch.createdAt.$gte = start;
-      }
-
-      if (endDate) {
-        const end = new Date(endDate);
-        end.setHours(23, 59, 59, 999);
-        txnMatch.createdAt.$lte = end;
-      }
-    }
-
-    const itemLabMatch = labId
-      ? { 'items.lab_id': new mongoose.Types.ObjectId(labId) }
-      : {};
-
-    const assetMatch = labId
-      ? { lab_id: new mongoose.Types.ObjectId(labId) }
-      : {};
-
-    /* ============================
-       1️⃣ TRANSACTION STATS
-    ============================= */
+    const txMatch = {};
+    if (startDate || endDate) Object.assign(txMatch, dateRangeMatch(startDate, endDate));
 
     const transactionStats = await Transaction.aggregate([
-      { $match: txnMatch },
+      { $match: txMatch },
       { $unwind: '$items' },
-      ...(labId ? [{ $match: itemLabMatch }] : []),
+      ...(labId ? [{ $match: { 'items.lab_id': new mongoose.Types.ObjectId(labId) } }] : []),
       {
         $group: {
           _id: '$items.item_id',
@@ -866,10 +857,7 @@ exports.getItemReport = async (req, res) => {
       }
     ]);
 
-    /* ============================
-       2️⃣ CURRENT INVENTORY STATE
-    ============================= */
-
+    const assetMatch = labId ? { lab_id: new mongoose.Types.ObjectId(labId) } : {};
     const assetStats = await ItemAsset.aggregate([
       { $match: assetMatch },
       {
@@ -882,136 +870,189 @@ exports.getItemReport = async (req, res) => {
       }
     ]);
 
-    /* ============================
-       3️⃣ CONVERT TO MAPS (FAST LOOKUP)
-    ============================= */
+    const itemFilter = { is_active: true };
+    if (category) itemFilter.category = new RegExp(category, 'i');
+    if (tracking_type) itemFilter.tracking_type = tracking_type;
 
-    const txnMap = new Map(
-      transactionStats.map(t => [String(t._id), t])
-    );
+    const inventoryFilter = labId ? { lab_id: new mongoose.Types.ObjectId(labId) } : {};
+    const inventories = await LabInventory.find(inventoryFilter)
+      .populate({ path: 'item_id', match: itemFilter, select: 'name sku category tracking_type' })
+      .lean();
 
-    const assetMap = new Map(
-      assetStats.map(a => [String(a._id), a])
-    );
+    const result = inventories
+      .filter(inv => inv.item_id)
+      .map(inv => {
+        const item = inv.item_id;
+        const txnStat = transactionStats.find(t => String(t._id) === String(item._id));
+        const assetStat = assetStats.find(a => String(a._id) === String(item._id));
+        return {
+          item_id: item._id, name: item.name, sku: item.sku,
+          category: item.category || '—', tracking_type: item.tracking_type,
+          total_quantity: inv.total_quantity,
+          available_quantity: inv.available_quantity,
+          reserved_quantity: inv.reserved_quantity,
+          borrow_count: txnStat?.borrow_count || 0,
+          total_issued: txnStat?.total_issued || 0,
+          total_returned: txnStat?.total_returned || 0,
+          total_damaged: txnStat?.total_damaged || 0,
+          assets_good: assetStat?.good || 0,
+          assets_faulty: assetStat?.faulty || 0,
+          assets_broken: assetStat?.broken || 0
+        };
+      })
+      .sort((a, b) => b.borrow_count - a.borrow_count);
 
-    /* ============================
-       4️⃣ FETCH ITEMS (PAGINATED)
-    ============================= */
-
-    const skip = (page - 1) * limit;
-
-    const [items, totalItems] = await Promise.all([
-      Item.find({ is_active: true })
-        .select('name sku category')
-        .skip(skip)
-        .limit(limit)
-        .lean(),
-
-      Item.countDocuments({ is_active: true })
-    ]);
-
-    /* ============================
-       5️⃣ MERGE DATA
-    ============================= */
-
-    const data = items.map(item => {
-      const txn = txnMap.get(String(item._id));
-      const asset = assetMap.get(String(item._id));
-
-      const totalStock =
-        (asset?.good_count || 0) +
-        (asset?.faulty_count || 0) +
-        (asset?.broken_count || 0);
-
-      const issued = txn?.total_issued || 0;
-
-      return {
-        item_id: item._id,
-        name: item.name,
-        sku: item.sku,
-        category: item.category,
-
-        // Transaction stats
-        issued_in_range: issued,
-        damaged_in_range: txn?.total_damaged || 0,
-        returned_in_range: txn?.total_returned || 0,
-
-        // Current inventory
-        good_now: asset?.good_count || 0,
-        faulty_now: asset?.faulty_count || 0,
-        broken_now: asset?.broken_count || 0,
-
-        // Derived metric
-        utilization_rate:
-          totalStock > 0 ? +(issued / totalStock).toFixed(2) : 0
-      };
-    });
-
-    /* ============================
-       6️⃣ SUMMARY STATS
-    ============================= */
-
-    const summary = {
-      total_items: totalItems,
-      total_issued: transactionStats.reduce(
-        (sum, t) => sum + t.total_issued,
-        0
-      ),
-      total_damaged: transactionStats.reduce(
-        (sum, t) => sum + t.total_damaged,
-        0
-      ),
-      total_returned: transactionStats.reduce(
-        (sum, t) => sum + t.total_returned,
-        0
-      ),
-      total_good: assetStats.reduce(
-        (sum, a) => sum + a.good_count,
-        0
-      ),
-      total_faulty: assetStats.reduce(
-        (sum, a) => sum + a.faulty_count,
-        0
-      ),
-      total_broken: assetStats.reduce(
-        (sum, a) => sum + a.broken_count,
-        0
-      )
-    };
-
-    /* ============================
-       RESPONSE
-    ============================= */
+    const total = result.length;
+    const paginated = result.slice(skip, skip + limitNum);
 
     return res.json({
       success: true,
-
-      page,
-      limit,
-      total_items: totalItems,
-      total_pages: Math.ceil(totalItems / limit),
-
-      summary,
-
-      data
+      page: pageNum, limit: limitNum,
+      totalItems: total, totalPages: Math.ceil(total / limitNum),
+      count: paginated.length, data: paginated
     });
 
   } catch (err) {
-    console.error('Item analytics error:', err);
-    return res.status(500).json({
-      error: 'Failed to fetch item analytics'
-    });
+    console.error('Item report error:', err);
+    return res.status(500).json({ error: 'Failed to fetch item report' });
   }
 };
 
-const executeInLabContext = async (req, res, labId, handler) => {
+/* ============================
+   4. LAB COMPARISON
+   GET /super-admin/analytics/labs/compare?startDate=&endDate=
+   Side-by-side stats for all active labs
+============================ */
+exports.getLabComparison = async (req, res) => {
   try {
-    const lab = await Lab.findById(labId);
-    if (!lab || !lab.is_active) {
-      return res.status(404).json({ success: false, message: 'Invalid or inactive lab' });
-    }
-    req.user.lab_id = labId;
-    return handler(req, res);
+    const { startDate, endDate } = req.query;
+    const dateFilter = dateRangeMatch(startDate, endDate);
+
+    const labs = await Lab.find({ is_active: true }).select('name code location').lean();
+
+    const result = await Promise.all(labs.map(async (lab) => {
+      const labObjectId = new mongoose.Types.ObjectId(lab._id);
+
+      const [txStats, invStats, damagedCount, staffCount] = await Promise.all([
+        Transaction.aggregate([
+          { $match: { 'items.lab_id': labObjectId, ...dateFilter } },
+          {
+            $group: {
+              _id: null,
+              total: { $sum: 1 },
+              active: { $sum: { $cond: [{ $eq: ['$status', 'active'] }, 1, 0] } },
+              completed: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
+              overdue: { $sum: { $cond: [{ $in: ['$status', ['overdue', 'partial_returned']] }, 1, 0] } }
+            }
+          }
+        ]),
+        LabInventory.aggregate([
+          { $match: { lab_id: labObjectId } },
+          {
+            $group: {
+              _id: null,
+              total_items: { $sum: 1 },
+              total_qty: { $sum: '$total_quantity' },
+              available_qty: { $sum: '$available_quantity' }
+            }
+          }
+        ]),
+        ItemAsset.countDocuments({ lab_id: labObjectId, condition: { $ne: 'good' } }),
+        Staff.countDocuments({ lab_id: labObjectId, is_active: true, role: { $in: ['incharge', 'assistant'] } })
+      ]);
+
+      const s = txStats[0] || {};
+      const inv = invStats[0] || {};
+
+      return {
+        lab_id: lab._id, lab_name: lab.name, lab_code: lab.code,
+        staff_count: staffCount,
+        total_items: inv.total_items || 0,
+        total_qty: inv.total_qty || 0,
+        available_qty: inv.available_qty || 0,
+        utilization_pct: inv.total_qty > 0
+          ? Math.round(((inv.total_qty - inv.available_qty) / inv.total_qty) * 100) : 0,
+        transactions_total: s.total || 0,
+        transactions_active: s.active || 0,
+        transactions_completed: s.completed || 0,
+        transactions_overdue: s.overdue || 0,
+        damaged_assets: damagedCount
+      };
+    }));
+
+    return res.json({ success: true, count: result.length, data: result });
+
+  } catch (err) {
+    console.error('Lab comparison error:', err);
+    return res.status(500).json({ error: 'Failed to fetch lab comparison' });
+  }
+};
+
+/* ============================
+   5. OVERDUE REPORT
+   GET /super-admin/analytics/overdue?labId=&page=&limit=
+   Sorted by most days overdue first
+============================ */
+exports.getOverdueReport = async (req, res) => {
+  try {
+    const { labId, page = 1, limit = 25 } = req.query;
+    const pageNum = Math.max(parseInt(page), 1);
+    const limitNum = Math.min(parseInt(limit), 100);
+    const skip = (pageNum - 1) * limitNum;
+    const now = new Date();
+
+    const labMatch = labId ? { 'items.lab_id': new mongoose.Types.ObjectId(labId) } : {};
+
+    const pipeline = [
+      {
+        $match: {
+          ...labMatch,
+          status: { $in: ['overdue', 'active', 'partial_returned'] },
+          expected_return_date: { $lt: now }
+        }
+      },
+      {
+        $addFields: {
+          days_overdue: {
+            $ceil: { $divide: [{ $subtract: [now, '$expected_return_date'] }, 86400000] }
+          }
+        }
+      },
+      {
+        $lookup: {
+          from: 'students', localField: 'student_id', foreignField: '_id', as: 'student',
+          pipeline: [{ $project: { name: 1, reg_no: 1, email: 1 } }]
+        }
+      },
+      { $unwind: { path: '$student', preserveNullAndEmptyArrays: true } },
+      {
+        $project: {
+          transaction_id: 1, status: 1, student_reg_no: 1, faculty_email: 1,
+          expected_return_date: 1, days_overdue: 1,
+          items_count: { $size: '$items' },
+          student_name: '$student.name', student_email: '$student.email'
+        }
+      },
+      { $sort: { days_overdue: -1 } },
+      {
+        $facet: {
+          metadata: [{ $count: 'total' }],
+          data: [{ $skip: skip }, { $limit: limitNum }]
+        }
+      }
+    ];
+
+    const result = await Transaction.aggregate(pipeline);
+    const total = result[0]?.metadata[0]?.total || 0;
+    const data = result[0]?.data || [];
+
+    return res.json({
+      success: true,
+      page: pageNum, limit: limitNum,
+      totalItems: total, totalPages: Math.ceil(total / limitNum),
+      count: data.length, data
+    });
+
   } catch (err) {
     console.error('Overdue report error:', err);
     return res.status(500).json({ error: 'Failed to fetch overdue report' });
