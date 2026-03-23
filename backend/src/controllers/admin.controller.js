@@ -622,33 +622,44 @@ exports.searchTransactions = async (req, res) => {
       status, item_name, asset_tag, page = 1, limit = 25
     } = req.query;
 
-    const pageNum = Math.max(parseInt(page), 1);
+    const pageNum  = Math.max(parseInt(page),  1);
     const limitNum = Math.min(parseInt(limit), 100);
-    const skip = (pageNum - 1) * limitNum;
+    const skip     = (pageNum - 1) * limitNum;
 
-    // Pre-resolve item_name
+    // Pre-resolve item_name → item _ids
     let itemIdFilter = null;
     if (item_name) {
       const matchedItems = await Item.find({ name: new RegExp(item_name, 'i') }).select('_id').lean();
-      if (matchedItems.length === 0) return res.json({ success: true, page: pageNum, limit: limitNum, totalItems: 0, totalPages: 0, count: 0, data: [] });
+      if (matchedItems.length === 0) {
+        return res.json({ success: true, page: pageNum, limit: limitNum, totalItems: 0, totalPages: 0, count: 0, data: [] });
+      }
       itemIdFilter = matchedItems.map(i => i._id);
     }
 
-    // Pre-resolve asset_tag
+    // Pre-resolve asset_tag → asset _ids
     let assetIdFilter = null;
     if (asset_tag) {
-      const matchedAssets = await ItemAsset.find({ lab_id: labObjectId, asset_tag: new RegExp(asset_tag, 'i') }).select('_id').lean();
-      if (matchedAssets.length === 0) return res.json({ success: true, page: pageNum, limit: limitNum, totalItems: 0, totalPages: 0, count: 0, data: [] });
+      const matchedAssets = await ItemAsset.find({
+        lab_id: labObjectId,
+        asset_tag: new RegExp(asset_tag, 'i')
+      }).select('_id').lean();
+      if (matchedAssets.length === 0) {
+        return res.json({ success: true, page: pageNum, limit: limitNum, totalItems: 0, totalPages: 0, count: 0, data: [] });
+      }
       assetIdFilter = matchedAssets.map(a => a._id);
     }
 
+    /* ── Build match stage ── */
     const matchStage = { 'items.lab_id': labObjectId };
-    if (transaction_id) matchStage.transaction_id = transaction_id;
-    if (reg_no)         matchStage.student_reg_no = reg_no;
-    if (faculty_email)  matchStage.faculty_email = faculty_email;
-    if (faculty_id)     matchStage.faculty_id = faculty_id;
-    if (status)         matchStage.status = status;
 
+    // ✅ Prefix regex on all text fields — no more exact match
+    if (transaction_id) matchStage.transaction_id = new RegExp(`^${transaction_id.trim()}`, 'i');
+    if (reg_no)         matchStage.student_reg_no  = new RegExp(reg_no.trim(),        'i');
+    if (faculty_email)  matchStage.faculty_email   = new RegExp(faculty_email.trim(), 'i');
+    if (faculty_id)     matchStage.faculty_id      = new RegExp(faculty_id.trim(),    'i');
+    if (status)         matchStage.status          = status; // exact — dropdown value
+
+    /* ── Item filter conditions ── */
     const itemFilterConditions = [{ $eq: ['$$item.lab_id', labObjectId] }];
 
     if (itemIdFilter) {
@@ -657,17 +668,17 @@ exports.searchTransactions = async (req, res) => {
 
     if (assetIdFilter) {
       itemFilterConditions.push({
-        $gt: [
-          {
-            $size: {
-              $ifNull: [
-                { $filter: { input: { $ifNull: ['$$item.asset_ids', []] }, as: 'aid', cond: { $in: ['$$aid', assetIdFilter] } } },
-                []
-              ]
-            }
-          },
-          0
-        ]
+        $gt: [{
+          $size: {
+            $ifNull: [{
+              $filter: {
+                input: { $ifNull: ['$$item.asset_ids', []] },
+                as: 'aid',
+                cond: { $in: ['$$aid', assetIdFilter] }
+              }
+            }, []]
+          }
+        }, 0]
       });
     }
 
@@ -717,7 +728,6 @@ exports.searchTransactions = async (req, res) => {
         }
       },
 
-      // ✅ Full asset objects + flat tags
       assetMergeStage,
 
       { $project: { _itemDefs: 0, _assetDefs: 0 } },
@@ -726,14 +736,14 @@ exports.searchTransactions = async (req, res) => {
       {
         $facet: {
           metadata: [{ $count: 'total' }],
-          data: [{ $skip: skip }, { $limit: limitNum }]
+          data:     [{ $skip: skip }, { $limit: limitNum }]
         }
       }
     ];
 
     const result = await Transaction.aggregate(pipeline);
-    const total = result[0]?.metadata[0]?.total || 0;
-    const data = result[0]?.data || [];
+    const total  = result[0]?.metadata[0]?.total || 0;
+    const data   = result[0]?.data || [];
 
     return res.json({
       success: true, page: pageNum, limit: limitNum,
