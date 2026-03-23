@@ -10,24 +10,26 @@ const damagedAssetLogSchema = new mongoose.Schema({
   transaction_id: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Transaction',
-    required: true
+    required: false,
+    default: null
   },
 
   student_id: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Student',
     required: false,
-    default:null,
+    default: null
   },
 
-    faculty_id: {
+  faculty_id: {
     type: String,   // e.g. "FAC1111"
     default: null
-    },
-    faculty_email: {
+  },
+
+  faculty_email: {
     type: String,
     default: null
-    },
+  },
 
   damage_reason: {
     type: String,

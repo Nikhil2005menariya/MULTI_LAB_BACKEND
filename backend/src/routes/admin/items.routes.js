@@ -10,14 +10,19 @@ const {
   removeItem,
   getAllItems,
   getItemById,
-  getItemAssets, // 👈 ADD
+  getItemAssets,
   searchItemsByPrefix,
+  markAssetDamaged,
+  getAssetTransactionHistory,
 } = require('../../controllers/admin.controller');
 
 router.use(auth, role('incharge'));
 
 // POST - add new item
 router.post('/', addItem);
+
+// POST - mark asset as damaged
+router.post('/:id/mark-damaged', markAssetDamaged);
 
 // PUT - update item details / quantity
 router.put('/:id', updateItem);
@@ -26,13 +31,17 @@ router.put('/:id', updateItem);
 router.delete('/:id', removeItem);
 
 router.get('/search', searchItemsByPrefix);
+
+// GET - asset transaction history (must be before /:id routes that end with different paths)
+router.get('/:id/assets/:assetTag/transactions', getAssetTransactionHistory);
+
 // GET - view all items
 router.get('/', getAllItems);
 
 // GET - view single item
 router.get('/:id', getItemById);
 
-// GET - item assets (NEW ✅)
+// GET - item assets
 router.get('/:id/assets', getItemAssets);
 
 

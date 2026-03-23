@@ -7,6 +7,7 @@ const Lab = require('../models/Lab');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const Staff = require('../models/Staff');
+const Student = require('../models/Student');
 const { sendMail } = require('../services/mail.service');
 const ComponentRequest = require('../models/ComponentRequest');
 const Bill = require('../models/Bill');
@@ -2011,6 +2012,245 @@ exports.completeReturn = async (req, res) => {
   } catch (err) {
     await session.abortTransaction();
     return res.status(400).json({ success: false, message: err.message });
+  } finally {
+    session.endSession();
+  }
+};
+
+/* ============================
+   GET ASSET TRANSACTION HISTORY
+   GET /api/admin/items/:itemId/assets/:assetTag/transactions
+   Returns last 3 transactions involving this asset
+============================ */
+exports.getAssetTransactionHistory = async (req, res) => {
+  try {
+    const labId = req.user.lab_id;
+    if (!labId) return res.status(403).json({ success: false, message: 'Lab access denied' });
+
+    const { assetTag } = req.params;
+
+    // Find asset by tag
+    const asset = await ItemAsset.findOne({
+      asset_tag: assetTag.toUpperCase().trim(),
+      lab_id: labId
+    }).lean();
+
+    if (!asset) return res.status(404).json({ success: false, message: 'Asset not found' });
+
+    // Find last 3 transactions containing this asset
+    const transactions = await Transaction.find({
+      'items.asset_ids': asset._id,
+      status: { $in: ['active', 'return_requested', 'partial_returned', 'completed', 'overdue'] }
+    })
+      .populate('student_id', 'name reg_no email')
+      .select('transaction_id student_id student_reg_no actual_return_date issued_at status')
+      .sort({ actual_return_date: -1, issued_at: -1 })
+      .limit(3)
+      .lean();
+
+    const formatted = transactions.map(t => ({
+      transaction_id: t.transaction_id,
+      student_id: t.student_id?._id,
+      student_name: t.student_id?.name,
+      student_reg_no: t.student_reg_no || t.student_id?.reg_no,
+      student_email: t.student_id?.email,
+      return_date: t.actual_return_date || t.issued_at,
+      issued_at: t.issued_at,
+      status: t.status
+    }));
+
+    return res.json({ success: true, data: formatted });
+
+  } catch (error) {
+    console.error('Get asset transaction history error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to fetch transaction history' });
+  }
+};
+
+/* ============================
+   MARK ASSET AS DAMAGED (with optional transaction_id)
+   POST /api/admin/items/:itemId/mark-damaged
+   Body: {
+     asset_tag: string,
+     transaction_id?: string,
+     damage_reason: string,
+     remarks?: string,
+     type: 'transaction' | 'normal'
+   }
+============================ */
+exports.markAssetDamaged = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const labId = req.user.lab_id;
+    if (!labId) throw new Error('Lab access denied');
+
+    const { asset_tag, transaction_id, damage_reason, remarks = '', type } = req.body;
+
+    if (!asset_tag?.trim()) throw new Error('Asset tag is required');
+    if (!damage_reason?.trim()) throw new Error('Damage reason is required');
+    if (!['transaction', 'normal'].includes(type)) throw new Error('Type must be "transaction" or "normal"');
+
+    // Find the asset
+    const asset = await ItemAsset.findOne({
+      asset_tag: asset_tag.trim().toUpperCase(),
+      lab_id: labId
+    }).session(session);
+
+    if (!asset) throw new Error('Asset not found in this lab');
+    if (asset.status === 'damaged') throw new Error('Asset is already marked as damaged');
+
+    const labObjectId = new mongoose.Types.ObjectId(String(labId));
+    const item = await Item.findById(asset.item_id).session(session);
+    if (!item) throw new Error('Item not found');
+
+    // Variables for transaction details
+    let transaction = null;
+    let student = null;
+    let studentEmail = '';
+    let facultyEmail = '';
+    let facultyId = '';
+
+    if (type === 'transaction' && transaction_id) {
+      // Verify transaction exists and contains this asset
+      transaction = await Transaction.findOne({
+        transaction_id: transaction_id.trim(),
+        'items.asset_ids': asset._id,
+        status: { $in: ['active', 'return_requested', 'partial_returned', 'completed', 'overdue'] }
+      }).session(session);
+
+      if (!transaction) throw new Error('Transaction not found or asset not in this transaction');
+
+      // Get student info
+      if (transaction.student_id) {
+        student = await Student.findById(transaction.student_id)
+          .select('name reg_no email')
+          .session(session);
+        if (student) studentEmail = student.email;
+      }
+      facultyEmail = transaction.faculty_email || '';
+      facultyId = transaction.faculty_id || '';
+    }
+
+    // Create damage log
+    const damageLog = await DamagedAssetLog.create([{
+      asset_id: asset._id,
+      transaction_id: transaction?._id || null,
+      student_id: student?._id || null,
+      faculty_id: facultyId || null,
+      faculty_email: facultyEmail || null,
+      damage_reason: damage_reason.trim(),
+      remarks: remarks.trim(),
+      status: 'damaged',
+      reported_at: new Date()
+    }], { session });
+
+    // Update asset status
+    asset.status = 'damaged';
+    asset.condition = 'broken';
+    asset.last_transaction_id = transaction?._id || null;
+    await asset.save({ session });
+
+    // Update inventory (move from available/issued to damaged)
+    const inventory = await LabInventory.findOne({
+      lab_id: labObjectId,
+      item_id: asset.item_id
+    }).session(session);
+
+    if (inventory) {
+      if (inventory.available_quantity > 0) {
+        inventory.available_quantity -= 1;
+      }
+      inventory.damaged_quantity = (inventory.damaged_quantity || 0) + 1;
+      await inventory.save({ session });
+    }
+
+    await session.commitTransaction();
+
+    // Send emails if transaction type
+    if (type === 'transaction' && transaction) {
+      const damageDetails = {
+        asset_tag: asset.asset_tag,
+        asset_name: item.name,
+        damage_reason: damage_reason.trim(),
+        transaction_id: transaction.transaction_id,
+        project_name: transaction.project_name,
+        student_reg_no: transaction.student_reg_no,
+        student_name: student?.name || 'Student'
+      };
+
+      // Email to student
+      if (studentEmail) {
+        try {
+          const studentHtml = `
+            <h2>Asset Damage Notification</h2>
+            <p>Dear ${student?.name},</p>
+            <p>An asset from your transaction has been marked as damaged.</p>
+            <h3>Damage Details:</h3>
+            <ul>
+              <li><strong>Asset Tag:</strong> ${damageDetails.asset_tag}</li>
+              <li><strong>Asset Name:</strong> ${damageDetails.asset_name}</li>
+              <li><strong>Damage Reason:</strong> ${damageDetails.damage_reason}</li>
+              <li><strong>Transaction ID:</strong> ${damageDetails.transaction_id}</li>
+              <li><strong>Project Name:</strong> ${damageDetails.project_name}</li>
+            </ul>
+            <p>Please contact your faculty for further clarification.</p>
+          `;
+          await sendMail({
+            to: studentEmail,
+            subject: `Asset Damage Report - ${damageDetails.asset_tag}`,
+            html: studentHtml
+          });
+        } catch (err) {
+          console.error('Failed to send email to student:', err);
+        }
+      }
+
+      // Email to faculty
+      if (facultyEmail) {
+        try {
+          const facultyHtml = `
+            <h2>Asset Damage Notification</h2>
+            <p>Dear Faculty,</p>
+            <p>An asset from one of your transactions has been marked as damaged.</p>
+            <h3>Damage Details:</h3>
+            <ul>
+              <li><strong>Asset Tag:</strong> ${damageDetails.asset_tag}</li>
+              <li><strong>Asset Name:</strong> ${damageDetails.asset_name}</li>
+              <li><strong>Damage Reason:</strong> ${damageDetails.damage_reason}</li>
+              <li><strong>Transaction ID:</strong> ${damageDetails.transaction_id}</li>
+              <li><strong>Project Name:</strong> ${damageDetails.project_name}</li>
+              <li><strong>Student Registration No:</strong> ${damageDetails.student_reg_no}</li>
+              <li><strong>Student Name:</strong> ${damageDetails.student_name}</li>
+            </ul>
+            <p>Please review the damage and coordinate with the incharge for further action.</p>
+          `;
+          await sendMail({
+            to: facultyEmail,
+            subject: `Asset Damage Report - ${damageDetails.asset_tag}`,
+            html: facultyHtml
+          });
+        } catch (err) {
+          console.error('Failed to send email to faculty:', err);
+        }
+      }
+    }
+
+    return res.json({
+      success: true,
+      message: 'Asset marked as damaged successfully',
+      data: {
+        asset_tag: asset.asset_tag,
+        damage_log_id: damageLog[0]._id,
+        transaction_id: transaction?._id || null
+      }
+    });
+
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('Mark asset damaged error:', error);
+    return res.status(400).json({ success: false, message: error.message });
   } finally {
     session.endSession();
   }
