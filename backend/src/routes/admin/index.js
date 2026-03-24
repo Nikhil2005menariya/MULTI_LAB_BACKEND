@@ -3,8 +3,12 @@ const router = express.Router();
 
 const auth = require('../../middlewares/auth.middleware');
 const role = require('../../middlewares/role.middleware');
+const { apiLimiter } = require('../../middlewares/rateLimiter.middleware');
 
-// 🔒 Protect ALL admin routes
+// Apply API rate limiting to all admin routes
+router.use(apiLimiter);
+
+// Protect ALL admin routes
 router.use(auth, role('incharge'));
 
 const itemRoutes = require('./items.routes');
@@ -13,8 +17,8 @@ const overdueRoutes = require('./overdue.routes');
 const damagedAssetsRoutes = require('./damagedAssets.routes');
 const profileRoutes = require('./profile.routes');
 const labTransactionRoutes = require('./labTransactions.routes');
-const componentrequest=require('./componentRequest.routes');
-const billRoutes=require('./bills.routes');
+const componentRequestRoutes = require('./componentRequest.routes');
+const billRoutes = require('./bills.routes');
 
 router.use('/analysis', require('../../analysis/analysis.routes'));
 router.use('/items', itemRoutes);
@@ -23,7 +27,7 @@ router.use('/overdue', overdueRoutes);
 router.use('/damaged-assets', damagedAssetsRoutes);
 router.use('/profile', profileRoutes);
 router.use('/lab-transactions', labTransactionRoutes);
-router.use('/component-requests', componentrequest);
+router.use('/component-requests', componentRequestRoutes);
 router.use('/bills', billRoutes);
 
 

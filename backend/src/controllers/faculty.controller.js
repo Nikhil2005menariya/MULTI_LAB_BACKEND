@@ -5,6 +5,72 @@ const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const { sendMail } = require('../services/mail.service');
 const mongoose = require('mongoose');
+
+/* =====================================================
+   ================= VALIDATION HELPERS ================
+===================================================== */
+
+const EMAIL_REGEX = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+const NAME_REGEX = /^[a-zA-Z\s.'-]{2,100}$/;
+const FACULTY_ID_REGEX = /^[a-zA-Z0-9_-]{2,50}$/;
+const HEX_TOKEN_REGEX = /^[a-fA-F0-9]{64}$/;
+const OTP_REGEX = /^[0-9]{6}$/;
+const PASSWORD_MIN_LENGTH = 8;
+
+const isValidEmail = (email) => {
+  if (!email || typeof email !== 'string') return false;
+  return EMAIL_REGEX.test(email.trim()) && email.length <= 254;
+};
+
+const isValidName = (name) => {
+  if (!name || typeof name !== 'string') return false;
+  return NAME_REGEX.test(name.trim());
+};
+
+const isValidFacultyId = (facultyId) => {
+  if (!facultyId || typeof facultyId !== 'string') return false;
+  return FACULTY_ID_REGEX.test(facultyId.trim());
+};
+
+const isValidHexToken = (token) => {
+  if (!token || typeof token !== 'string') return false;
+  return HEX_TOKEN_REGEX.test(token);
+};
+
+const isValidOtp = (otp) => {
+  if (!otp || typeof otp !== 'string') return false;
+  return OTP_REGEX.test(otp);
+};
+
+const isValidPassword = (password) => {
+  if (!password || typeof password !== 'string') return false;
+  if (password.length < PASSWORD_MIN_LENGTH || password.length > 128) return false;
+  const hasUpperCase = /[A-Z]/.test(password);
+  const hasLowerCase = /[a-z]/.test(password);
+  const hasNumber = /[0-9]/.test(password);
+  return hasUpperCase && hasLowerCase && hasNumber;
+};
+
+const escapeHtml = (str) => {
+  if (!str || typeof str !== 'string') return '';
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+};
+
+const sanitizeString = (str, maxLength = 500) => {
+  if (!str || typeof str !== 'string') return '';
+  return str.trim().slice(0, maxLength);
+};
+
+const timingSafeEqual = (a, b) => {
+  if (!a || !b || typeof a !== 'string' || typeof b !== 'string') return false;
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
+};
 /* =====================================================
    ================= EMAIL TOKEN FLOW ==================
 ===================================================== */
@@ -16,8 +82,8 @@ exports.approveTransaction = async (req, res) => {
   try {
     const { token } = req.body;
 
-    if (!token) {
-      return res.status(400).json({ error: 'Approval token missing' });
+    if (!token || !isValidHexToken(token)) {
+      return res.status(400).json({ error: 'Invalid approval token format' });
     }
 
     const transaction = await Transaction.findOne({
@@ -42,7 +108,8 @@ exports.approveTransaction = async (req, res) => {
     });
 
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Approve transaction error:', err);
+    res.status(500).json({ error: 'Failed to approve transaction' });
   }
 };
 
@@ -54,8 +121,8 @@ exports.getApprovalDetails = async (req, res) => {
   try {
     const { token } = req.query;
 
-    if (!token) {
-      return res.status(400).json({ error: 'Approval token missing' });
+    if (!token || !isValidHexToken(token)) {
+      return res.status(400).json({ error: 'Invalid approval token format' });
     }
 
     const transaction = await Transaction.findOne({
@@ -77,7 +144,8 @@ exports.getApprovalDetails = async (req, res) => {
     });
 
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Get approval details error:', err);
+    res.status(500).json({ error: 'Failed to fetch approval details' });
   }
 };
 
@@ -91,10 +159,13 @@ exports.rejectTransaction = async (req, res) => {
   try {
     const { token, reason } = req.body;
 
-    if (!token) {
+    if (!token || !isValidHexToken(token)) {
       await session.abortTransaction();
-      return res.status(400).json({ error: 'Approval token missing' });
+      return res.status(400).json({ error: 'Invalid approval token format' });
     }
+
+    // Sanitize reason to prevent XSS
+    const sanitizedReason = sanitizeString(reason, 500);
 
     const transaction = await Transaction.findOne({
       'faculty_approval.approval_token': token,
@@ -143,7 +214,7 @@ exports.rejectTransaction = async (req, res) => {
 
     transaction.status = 'rejected';
     transaction.faculty_approval.approved = false;
-    transaction.faculty_approval.rejected_reason = reason || '';
+    transaction.faculty_approval.rejected_reason = sanitizedReason;
     transaction.faculty_approval.approved_at = new Date();
     transaction.faculty_approval.approval_token = undefined;
 
@@ -164,7 +235,7 @@ exports.rejectTransaction = async (req, res) => {
     console.error('REJECT TRANSACTION ERROR:', err);
 
     return res.status(500).json({
-      error: err.message
+      error: 'Failed to reject transaction'
     });
   }
 };
@@ -185,14 +256,30 @@ exports.registerFaculty = async (req, res) => {
       return res.status(400).json({ message: 'Missing required fields' });
     }
 
-    // Optional domain restriction
-    // if (!email.endsWith('@vit.ac.in')) {
-    //   return res.status(400).json({
-    //     message: 'Only official VIT email is allowed'
-    //   });
-    // }
+    // Validate email format
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ message: 'Invalid email format' });
+    }
 
-    const existing = await Faculty.findOne({ email });
+    // Validate name (letters, spaces, dots, hyphens, apostrophes only)
+    if (!isValidName(name)) {
+      return res.status(400).json({
+        message: 'Invalid name format. Use only letters, spaces, dots, hyphens, and apostrophes (2-100 characters)'
+      });
+    }
+
+    // Validate faculty_id (alphanumeric with underscores and hyphens)
+    if (!isValidFacultyId(faculty_id)) {
+      return res.status(400).json({
+        message: 'Invalid faculty ID format. Use only letters, numbers, underscores, and hyphens (2-50 characters)'
+      });
+    }
+
+    const sanitizedEmail = email.trim().toLowerCase();
+    const sanitizedName = name.trim();
+    const sanitizedFacultyId = faculty_id.trim();
+
+    const existing = await Faculty.findOne({ email: sanitizedEmail });
 
     if (existing) {
       return res.status(400).json({
@@ -203,9 +290,9 @@ exports.registerFaculty = async (req, res) => {
     const verificationToken = crypto.randomBytes(32).toString('hex');
 
     const faculty = await Faculty.create({
-      name,
-      email,
-      faculty_id,
+      name: sanitizedName,
+      email: sanitizedEmail,
+      faculty_id: sanitizedFacultyId,
       verification_token: verificationToken,
       verification_token_expiry: Date.now() + 1000 * 60 * 60, // 1 hour
       is_verified: false
@@ -214,11 +301,14 @@ exports.registerFaculty = async (req, res) => {
     const verificationLink =
       `${process.env.FRONTEND_URL}/faculty/verify?token=${verificationToken}`;
 
+    // Escape name for HTML email to prevent XSS
+    const escapedName = escapeHtml(sanitizedName);
+
     await sendMail({
-      to: email,
+      to: sanitizedEmail,
       subject: 'Verify Your Faculty Account',
       html: `
-        <p>Hello ${name},</p>
+        <p>Hello ${escapedName},</p>
         <p>Please verify your faculty account by clicking the link below:</p>
         <a href="${verificationLink}">Verify Account</a>
       `
@@ -239,15 +329,12 @@ exports.registerFaculty = async (req, res) => {
 /* =====================================================
    VERIFY EMAIL
 ===================================================== */
-/* =====================================================
-   VERIFY EMAIL
-===================================================== */
 exports.verifyEmail = async (req, res) => {
   try {
     const { token } = req.query;
 
-    if (!token) {
-      return res.status(400).json({ message: 'Verification token missing' });
+    if (!token || !isValidHexToken(token)) {
+      return res.status(400).json({ message: 'Invalid verification token format' });
     }
 
     const faculty = await Faculty.findOne({
@@ -282,9 +369,6 @@ exports.verifyEmail = async (req, res) => {
 /* =====================================================
    SET PASSWORD (AFTER VERIFICATION)
 ===================================================== */
-/* =====================================================
-   SET PASSWORD (AFTER VERIFICATION)
-===================================================== */
 exports.setPassword = async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -293,7 +377,20 @@ exports.setPassword = async (req, res) => {
       return res.status(400).json({ message: 'Missing fields' });
     }
 
-    const faculty = await Faculty.findOne({ email });
+    // Validate email format
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ message: 'Invalid email format' });
+    }
+
+    // Validate password strength
+    if (!isValidPassword(password)) {
+      return res.status(400).json({
+        message: 'Password must be 8-128 characters with at least one uppercase, one lowercase, and one number'
+      });
+    }
+
+    const sanitizedEmail = email.trim().toLowerCase();
+    const faculty = await Faculty.findOne({ email: sanitizedEmail });
 
     if (!faculty || !faculty.is_verified) {
       return res.status(400).json({
@@ -307,7 +404,7 @@ exports.setPassword = async (req, res) => {
       });
     }
 
-    const hashed = await bcrypt.hash(password, 10);
+    const hashed = await bcrypt.hash(password, 12);
 
     faculty.password = hashed;
     await faculty.save();
@@ -332,7 +429,18 @@ exports.loginFaculty = async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    const faculty = await Faculty.findOne({ email }).select('+password');
+    // Validate inputs exist
+    if (!email || !password) {
+      return res.status(400).json({ message: 'Email and password are required' });
+    }
+
+    // Validate email format
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ message: 'Invalid email format' });
+    }
+
+    const sanitizedEmail = email.trim().toLowerCase();
+    const faculty = await Faculty.findOne({ email: sanitizedEmail }).select('+password');
 
     if (!faculty || !faculty.is_verified) {
       return res.status(400).json({
@@ -351,7 +459,7 @@ exports.loginFaculty = async (req, res) => {
     faculty.last_login = new Date();
     await faculty.save();
 
-    const token = require('jsonwebtoken').sign(
+    const token = jwt.sign(
       {
         id: faculty._id,
         role: 'faculty'
@@ -391,7 +499,13 @@ exports.facultyForgotPassword = async (req, res) => {
       });
     }
 
-    const faculty = await Faculty.findOne({ email });
+    // Validate email format
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ message: 'Invalid email format' });
+    }
+
+    const sanitizedEmail = email.trim().toLowerCase();
+    const faculty = await Faculty.findOne({ email: sanitizedEmail });
 
     // Do NOT reveal if email exists (security best practice)
     if (!faculty || !faculty.is_verified) {
@@ -405,11 +519,14 @@ exports.facultyForgotPassword = async (req, res) => {
 
     await faculty.save();
 
+    // Escape name for HTML email to prevent XSS
+    const escapedName = escapeHtml(faculty.name);
+
     await sendMail({
       to: faculty.email,
       subject: 'Faculty Password Reset OTP',
       html: `
-        <p>Hello ${faculty.name},</p>
+        <p>Hello ${escapedName},</p>
         <p>Your password reset OTP is:</p>
         <h2>${otp}</h2>
         <p>This OTP expires in 10 minutes.</p>
@@ -442,7 +559,25 @@ exports.facultyResetPassword = async (req, res) => {
       });
     }
 
-    const faculty = await Faculty.findOne({ email }).select(
+    // Validate email format
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ message: 'Invalid email format' });
+    }
+
+    // Validate OTP format (6 digits)
+    if (!isValidOtp(otp)) {
+      return res.status(400).json({ message: 'Invalid OTP format' });
+    }
+
+    // Validate password strength
+    if (!isValidPassword(newPassword)) {
+      return res.status(400).json({
+        message: 'Password must be 8-128 characters with at least one uppercase, one lowercase, and one number'
+      });
+    }
+
+    const sanitizedEmail = email.trim().toLowerCase();
+    const faculty = await Faculty.findOne({ email: sanitizedEmail }).select(
       '+reset_otp +reset_otp_expiry +password'
     );
 
@@ -452,16 +587,21 @@ exports.facultyResetPassword = async (req, res) => {
       });
     }
 
-    if (
-      faculty.reset_otp !== otp ||
-      Date.now() > faculty.reset_otp_expiry
-    ) {
+    // Check OTP expiry first
+    if (!faculty.reset_otp || Date.now() > faculty.reset_otp_expiry) {
       return res.status(400).json({
         message: 'Invalid or expired OTP'
       });
     }
 
-    faculty.password = await bcrypt.hash(newPassword, 10);
+    // Use timing-safe comparison to prevent timing attacks
+    if (!timingSafeEqual(faculty.reset_otp, otp)) {
+      return res.status(400).json({
+        message: 'Invalid or expired OTP'
+      });
+    }
+
+    faculty.password = await bcrypt.hash(newPassword, 12);
     faculty.reset_otp = undefined;
     faculty.reset_otp_expiry = undefined;
 
@@ -545,7 +685,9 @@ exports.getAllTransactions = async (req, res) => {
 
     // 🔍 Search filter (prefix match)
     if (search) {
-      const regex = new RegExp(`^${search}`, 'i');
+      // Escape special regex characters to prevent ReDoS attacks
+      const escapedSearch = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(`^${escapedSearch}`, 'i');
 
       filter.$or = [
         { transaction_id: regex },
@@ -587,7 +729,7 @@ exports.getAllTransactions = async (req, res) => {
 };
 
 /* =====================================================
-   GET PENDING TRANSACTIONS
+  GET PENDING TRANSACTIONS
 ===================================================== */
 exports.getPendingTransactions = async (req, res) => {
   try {
@@ -628,8 +770,14 @@ exports.getTransactionDetails = async (req, res) => {
 
     if (!faculty) return res.status(404).json({ error: 'Faculty not found' });
 
+    // Validate and sanitize transaction_id
+    if (!transaction_id || !transaction_id.trim()) {
+      return res.status(400).json({ error: 'Transaction ID is required' });
+    }
+    const sanitizedTxnId = sanitizeString(transaction_id, 100);
+
     const transaction = await Transaction.findOne({
-      transaction_id,
+      transaction_id: sanitizedTxnId,
       faculty_email: faculty.email,
       faculty_id: faculty.faculty_id
     })
@@ -651,6 +799,7 @@ exports.getTransactionDetails = async (req, res) => {
     });
 
   } catch (err) {
+    console.error('Get transaction details error:', err);
     res.status(500).json({ error: 'Failed to fetch transaction details' });
   }
 };
@@ -703,8 +852,14 @@ exports.approveTransactionByFaculty = async (req, res) => {
 
     if (!faculty) return res.status(404).json({ error: 'Faculty not found' });
 
+    // Validate and sanitize transaction_id
+    if (!transaction_id || !transaction_id.trim()) {
+      return res.status(400).json({ error: 'Transaction ID is required' });
+    }
+    const sanitizedTxnId = sanitizeString(transaction_id, 100);
+
     const transaction = await Transaction.findOne({
-      transaction_id,
+      transaction_id: sanitizedTxnId,
       faculty_email: faculty.email,
       faculty_id: faculty.faculty_id,
       status: 'raised'
@@ -753,8 +908,18 @@ exports.rejectTransactionByFaculty = async (req, res) => {
       return res.status(404).json({ error: 'Faculty not found' });
     }
 
+    // Validate and sanitize transaction_id
+    if (!transaction_id || !transaction_id.trim()) {
+      await session.abortTransaction();
+      return res.status(400).json({ error: 'Transaction ID is required' });
+    }
+    const sanitizedTxnId = sanitizeString(transaction_id, 100);
+
+    // Sanitize reason to prevent XSS
+    const sanitizedReason = sanitizeString(reason, 500);
+
     const transaction = await Transaction.findOne({
-      transaction_id,
+      transaction_id: sanitizedTxnId,
       faculty_email: faculty.email,
       faculty_id: faculty.faculty_id,
       status: 'raised'
@@ -801,7 +966,7 @@ exports.rejectTransactionByFaculty = async (req, res) => {
 
     transaction.status = 'rejected';
     transaction.faculty_approval.approved = false;
-    transaction.faculty_approval.rejected_reason = reason || '';
+    transaction.faculty_approval.rejected_reason = sanitizedReason;
     transaction.faculty_approval.approved_at = new Date();
     transaction.faculty_approval.approval_token = undefined;
 

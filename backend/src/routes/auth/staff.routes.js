@@ -3,15 +3,16 @@ const router = express.Router();
 
 // middlewares
 const auth = require('../../middlewares/auth.middleware');
+const {
+  loginLimiter,
+  passwordResetLimiter,
+  otpLimiter,
+  emailChangeLimiter
+} = require('../../middlewares/rateLimiter.middleware');
 
 // controllers
 const {
   staffLogin,
-  forgotPassword,
-  resetPassword,
-  changePassword,
-  requestEmailChangeOTP,
-  confirmEmailChange,
   staffForgotPassword,
   staffResetPassword,
   staffChangePassword,
@@ -24,13 +25,13 @@ const {
 ===================================================== */
 
 // Login (super_admin / incharge / assistant)
-router.post('/login', staffLogin);
+router.post('/login', loginLimiter, staffLogin);
 
 // Forgot password (send OTP)
-router.post('/forgot-password', staffForgotPassword);
+router.post('/forgot-password', passwordResetLimiter, staffForgotPassword);
 
 // Reset password using OTP
-router.post('/reset-password',staffResetPassword);
+router.post('/reset-password', passwordResetLimiter, staffResetPassword);
 
 
 /* =====================================================
@@ -38,13 +39,13 @@ router.post('/reset-password',staffResetPassword);
 ===================================================== */
 
 // Change password (while logged in)
-router.post('/change-password', auth, staffChangePassword);
+router.post('/change-password', auth, otpLimiter, staffChangePassword);
 
 // Request email change OTP
-router.post('/request-email-change', auth, staffRequestEmailChangeOTP);
+router.post('/request-email-change', auth, emailChangeLimiter, staffRequestEmailChangeOTP);
 
 // Confirm email change
-router.post('/confirm-email-change', auth, staffConfirmEmailChange);
+router.post('/confirm-email-change', auth, otpLimiter, staffConfirmEmailChange);
 
 
 module.exports = router;

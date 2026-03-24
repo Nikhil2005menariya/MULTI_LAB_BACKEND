@@ -1,8 +1,10 @@
 const express = require('express');
 const router = express.Router();
 
-const auth = require('../../middlewares/auth.middleware');
-const role = require('../../middlewares/role.middleware');
+const {
+  validateLabId,
+  validatePaginationParams
+} = require('../../middlewares/paramValidator.middleware');
 
 const {
   createLab,
@@ -11,11 +13,14 @@ const {
   activateLab
 } = require('../../controllers/super_admin.controller');
 
-router.use(auth, role('super_admin'));
+/* =====================================================
+   SUPER ADMIN – LABS MANAGEMENT
+   Auth applied at index.js level
+===================================================== */
 
-router.post('/',                createLab);
-router.get('/',                 getAllLabs);
-router.delete('/:labId',        removeLab);
-router.patch('/:labId/activate', activateLab);
+router.post('/', createLab);
+router.get('/', validatePaginationParams, getAllLabs);
+router.delete('/:labId', validateLabId('labId'), removeLab);
+router.patch('/:labId/activate', validateLabId('labId'), activateLab);
 
 module.exports = router;

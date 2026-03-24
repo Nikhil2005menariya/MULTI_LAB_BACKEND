@@ -6,6 +6,57 @@ const DamagedAssetLog = require('../models/DamagedAssetLog');
 const Item = require('../models/Item');
 
 /* ============================
+   INPUT VALIDATION & SANITIZATION UTILITIES
+============================ */
+
+// Email validation (RFC 5322 simplified)
+const isValidEmail = (email) => {
+  if (!email || typeof email !== 'string') return false;
+  const emailRegex = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
+  return emailRegex.test(email) && email.length <= 254;
+};
+
+// Text field validation (description, category, etc.) - prevent XSS
+const sanitizeText = (text, maxLength = 1000) => {
+  if (!text || typeof text !== 'string') return '';
+  // Remove any HTML tags and limit length
+  return text.replace(/<[^>]*>/g, '').trim().substring(0, maxLength);
+};
+
+// Escape special regex characters to prevent ReDoS
+const escapeRegex = (str) => {
+  if (!str || typeof str !== 'string') return '';
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+};
+
+// Validate MongoDB ObjectId
+const isValidObjectId = (id) => {
+  return mongoose.Types.ObjectId.isValid(id);
+};
+
+// Validate positive integer
+const isValidPositiveInteger = (num) => {
+  const parsed = Number(num);
+  return !isNaN(parsed) && parsed > 0 && Number.isInteger(parsed);
+};
+
+// Validate non-negative integer
+const isValidNonNegativeInteger = (num) => {
+  const parsed = Number(num);
+  return !isNaN(parsed) && parsed >= 0 && Number.isInteger(parsed);
+};
+
+// Alphanumeric with basic allowed characters
+const isValidAlphanumeric = (str, allowSpaces = false, allowHyphens = false) => {
+  if (!str || typeof str !== 'string') return false;
+  let pattern = '^[a-zA-Z0-9';
+  if (allowSpaces) pattern += '\\s';
+  if (allowHyphens) pattern += '\\-';
+  pattern += ']+$';
+  return new RegExp(pattern).test(str);
+};
+
+/* ============================
    SHARED HELPER — asset merge stage
    Replaces raw asset_ids ObjectIds with full objects { _id, asset_tag, serial_no, status }
    AND keeps asset_tags as flat string array for convenience
@@ -77,12 +128,22 @@ exports.issueTransaction = async (req, res) => {
   try {
     const { transaction_id } = req.params;
     const assistantLabId = req.user.lab_id;
-    if (!assistantLabId) throw new Error('Unauthorized lab access');
+
+    // Validate lab ID
+    if (!assistantLabId || !isValidObjectId(assistantLabId)) {
+      throw new Error('Unauthorized lab access');
+    }
+
+    // Validate and sanitize transaction_id
+    if (!transaction_id || !transaction_id.trim()) {
+      throw new Error('Transaction ID is required');
+    }
+    const sanitizedTxnId = sanitizeText(transaction_id, 100);
 
     const labObjectId = new mongoose.Types.ObjectId(String(assistantLabId));
 
     const transaction = await Transaction.findOne({
-      transaction_id,
+      transaction_id: sanitizedTxnId,
       status: { $in: ['approved', 'partial_issued', 'active'] }
     }).session(session);
 
@@ -181,13 +242,26 @@ exports.returnTransaction = async (req, res) => {
     const assistantLabId = req.user.lab_id;
     const { items } = req.body;
 
-    if (!assistantLabId) throw new Error('Unauthorized lab access');
-    if (!Array.isArray(items) || items.length === 0) throw new Error('No return items provided');
+    // Validate lab ID
+    if (!assistantLabId || !isValidObjectId(assistantLabId)) {
+      throw new Error('Unauthorized lab access');
+    }
+
+    // Validate items array
+    if (!Array.isArray(items) || items.length === 0) {
+      throw new Error('No return items provided');
+    }
+
+    // Validate and sanitize transaction_id
+    if (!req.params.transaction_id || !req.params.transaction_id.trim()) {
+      throw new Error('Transaction ID is required');
+    }
+    const sanitizedTxnId = sanitizeText(req.params.transaction_id, 100);
 
     const labObjectId = new mongoose.Types.ObjectId(String(assistantLabId));
 
     const transaction = await Transaction.findOne({
-      transaction_id: req.params.transaction_id,
+      transaction_id: sanitizedTxnId,
       status: { $in: ['active', 'partial_returned'] }
     }).session(session);
 
@@ -196,8 +270,19 @@ exports.returnTransaction = async (req, res) => {
     let processedAnyItem = false;
 
     for (const returnItem of items) {
-      if (!returnItem.item_id || !returnItem.lab_id) throw new Error('item_id and lab_id are required');
-      if (returnItem.lab_id.toString() !== labObjectId.toString()) throw new Error('Unauthorized lab access');
+      // Validate required fields
+      if (!returnItem.item_id || !returnItem.lab_id) {
+        throw new Error('item_id and lab_id are required');
+      }
+
+      // Validate ObjectIds
+      if (!isValidObjectId(returnItem.item_id) || !isValidObjectId(returnItem.lab_id)) {
+        throw new Error('Invalid item_id or lab_id format');
+      }
+
+      if (returnItem.lab_id.toString() !== labObjectId.toString()) {
+        throw new Error('Unauthorized lab access');
+      }
 
       const txnItem = transaction.items.find(
         t => String(t.item_id) === String(returnItem.item_id) && String(t.lab_id) === String(returnItem.lab_id)
@@ -211,9 +296,15 @@ exports.returnTransaction = async (req, res) => {
       if (!item) throw new Error('Item not found');
 
       if (item.tracking_type === 'bulk') {
+        // Validate quantity
         const qty = Number(returnItem.returned_quantity);
+        if (!isValidPositiveInteger(returnItem.returned_quantity)) {
+          throw new Error('Invalid return quantity');
+        }
         const remainingReturnable = txnItem.issued_quantity - txnItem.returned_quantity;
-        if (!qty || qty <= 0 || qty > remainingReturnable) throw new Error('Invalid bulk return quantity');
+        if (qty > remainingReturnable) {
+          throw new Error('Invalid bulk return quantity');
+        }
         inventory.available_quantity += qty;
         txnItem.returned_quantity += qty;
         await inventory.save({ session });
@@ -225,6 +316,13 @@ exports.returnTransaction = async (req, res) => {
         const allIds = [...returnedIds, ...damagedIds];
 
         if (allIds.length === 0) throw new Error('No asset IDs provided for return');
+
+        // Validate all asset IDs are valid ObjectIds
+        for (const id of allIds) {
+          if (!isValidObjectId(id)) {
+            throw new Error('Invalid asset ID format');
+          }
+        }
 
         const validIssuedIds = txnItem.asset_ids.map(a => a.toString());
         for (const id of allIds) {
@@ -253,9 +351,16 @@ exports.returnTransaction = async (req, res) => {
           await asset.save({ session });
           inventory.damaged_quantity += 1;
 
+          // Sanitize damage reason and remarks
           const perAssetReason = Array.isArray(returnItem.per_asset_reasons)
             ? returnItem.per_asset_reasons.find(r => r.asset_id === assetId.toString())?.reason
             : null;
+
+          const damageReason = sanitizeText(
+            perAssetReason || returnItem.damage_reason || 'Reported damaged',
+            500
+          );
+          const remarks = sanitizeText(returnItem.remarks || '', 1000);
 
           await DamagedAssetLog.create([{
             asset_id: asset._id,
@@ -263,8 +368,8 @@ exports.returnTransaction = async (req, res) => {
             student_id: transaction.student_id || null,
             faculty_id: transaction.faculty_id || null,
             faculty_email: transaction.faculty_email || null,
-            damage_reason: perAssetReason || returnItem.damage_reason || 'Reported damaged',
-            remarks: returnItem.remarks || ''
+            damage_reason: damageReason,
+            remarks: remarks
           }], { session });
 
           txnItem.returned_quantity += 1;
@@ -517,7 +622,16 @@ exports.getAvailableAssetsByItem = async (req, res) => {
   try {
     const labId = req.user.lab_id;
     const { itemId } = req.params;
-    if (!labId) return res.status(403).json({ error: 'Lab access denied' });
+
+    // Validate lab ID
+    if (!labId || !isValidObjectId(labId)) {
+      return res.status(403).json({ error: 'Lab access denied' });
+    }
+
+    // Validate item ID
+    if (!itemId || !isValidObjectId(itemId)) {
+      return res.status(400).json({ error: 'Invalid item ID format' });
+    }
 
     const assets = await ItemAsset.find({ lab_id: labId, item_id: itemId, status: 'available' })
       .select('asset_tag serial_no condition status')
@@ -542,9 +656,30 @@ exports.issueLabSession = async (req, res) => {
     const assistantLabId = req.user.lab_id;
     const { student_reg_no, faculty_email, faculty_id, lab_slot, items } = req.body;
 
-    if (!assistantLabId || !faculty_email || !faculty_id || !lab_slot || !Array.isArray(items) || items.length === 0) {
-      throw new Error('Missing required fields');
+    // Validate lab ID
+    if (!assistantLabId || !isValidObjectId(assistantLabId)) {
+      throw new Error('Unauthorized lab access');
     }
+
+    // Validate required fields
+    if (!faculty_email || !faculty_id || !lab_slot) {
+      throw new Error('Missing required fields: faculty_email, faculty_id, or lab_slot');
+    }
+
+    // Validate items array
+    if (!Array.isArray(items) || items.length === 0) {
+      throw new Error('Items array is required and must not be empty');
+    }
+
+    // Validate email
+    if (!isValidEmail(faculty_email)) {
+      throw new Error('Invalid email format');
+    }
+
+    // Sanitize text inputs
+    const sanitizedFacultyId = sanitizeText(faculty_id, 100);
+    const sanitizedLabSlot = sanitizeText(lab_slot, 100);
+    const sanitizedStudentRegNo = student_reg_no ? sanitizeText(student_reg_no, 50) : 'LAB-SESSION';
 
     const labObjectId = new mongoose.Types.ObjectId(String(assistantLabId));
     const issuedAt = new Date();
@@ -557,8 +692,11 @@ exports.issueLabSession = async (req, res) => {
       issued_directly: true,
       status: 'active',
       student_id: null,
-      student_reg_no: student_reg_no || 'LAB-SESSION',
-      faculty_email, faculty_id, lab_slot, items: [],
+      student_reg_no: sanitizedStudentRegNo,
+      faculty_email,
+      faculty_id: sanitizedFacultyId,
+      lab_slot: sanitizedLabSlot,
+      items: [],
       issued_by_incharge_id: req.user.id,
       issued_at: issuedAt,
       expected_return_date: expectedReturnDate
@@ -567,6 +705,16 @@ exports.issueLabSession = async (req, res) => {
     const txn = transaction[0];
 
     for (const it of items) {
+      // Validate item_id
+      if (!it.item_id || !isValidObjectId(it.item_id)) {
+        throw new Error('Invalid item ID format');
+      }
+
+      // Validate quantity
+      if (!it.quantity || !isValidPositiveInteger(it.quantity)) {
+        throw new Error('Invalid quantity value');
+      }
+
       const item = await Item.findById(it.item_id).session(session);
       if (!item || !item.is_active) throw new Error('Invalid item selected');
 
@@ -574,7 +722,6 @@ exports.issueLabSession = async (req, res) => {
       if (!inventory) throw new Error('Item not found in this lab');
 
       if (item.tracking_type === 'bulk') {
-        if (!it.quantity || it.quantity <= 0) throw new Error(`Invalid quantity for ${item.name}`);
         if (inventory.available_quantity < it.quantity) throw new Error(`Insufficient stock for ${item.name}`);
         inventory.available_quantity -= it.quantity;
         await inventory.save({ session });
@@ -582,13 +729,12 @@ exports.issueLabSession = async (req, res) => {
       }
 
       if (item.tracking_type === 'asset') {
-        if (!it.quantity || it.quantity <= 0) throw new Error(`Quantity required for ${item.name}`);
         const assets = await ItemAsset.find({ lab_id: labObjectId, item_id: item._id, status: 'available' }).limit(it.quantity).session(session);
         if (assets.length < it.quantity) throw new Error(`Not enough assets for ${item.name}`);
 
         const assetIds = [];
         for (const asset of assets) {
-          asset.status = 'issued';
+          asset.status = ' issued';
           asset.last_transaction_id = txn._id;
           await asset.save({ session });
           assetIds.push(asset._id);
@@ -626,17 +772,23 @@ exports.issueLabSession = async (req, res) => {
 exports.getAvailableLabItems = async (req, res) => {
   try {
     const labId = req.user.lab_id;
-    if (!labId) return res.status(403).json({ error: 'Lab access denied' });
+    if (!labId || !isValidObjectId(labId)) {
+      return res.status(403).json({ error: 'Lab access denied' });
+    }
 
     const { q, page = 1, limit = 25 } = req.query;
-    const pageNum = Math.max(parseInt(page), 1);
-    const limitNum = Math.min(parseInt(limit), 100);
+
+    // Validate pagination
+    const pageNum = Math.max(parseInt(page) || 1, 1);
+    const limitNum = Math.min(Math.max(parseInt(limit) || 25, 1), 100);
     const skip = (pageNum - 1) * limitNum;
 
     // Build item-level filter
     const itemMatch = { is_active: true };
     if (q && q.trim().length > 0) {
-      const regex = new RegExp(q.trim(), 'i');
+      // Sanitize and escape regex input to prevent ReDoS
+      const sanitizedQ = escapeRegex(sanitizeText(q.trim(), 100));
+      const regex = new RegExp(sanitizedQ, 'i');
       itemMatch.$or = [
         { name: regex },
         { sku: regex },
@@ -718,14 +870,21 @@ exports.getAvailableLabItems = async (req, res) => {
 exports.searchLabItems = async (req, res) => {
   try {
     const labId = req.user.lab_id;
-    if (!labId) return res.status(403).json({ error: 'Lab access denied' });
+    if (!labId || !isValidObjectId(labId)) {
+      return res.status(403).json({ error: 'Lab access denied' });
+    }
 
     const { q } = req.query;
     const itemFilter = { is_active: true };
 
     if (q) {
+      // Sanitize and escape regex input to prevent ReDoS
+      const sanitizedQ = escapeRegex(sanitizeText(q, 100));
+      const regex = new RegExp(sanitizedQ, 'i');
       itemFilter.$or = [
-        { name: new RegExp(q, 'i') }, { sku: new RegExp(q, 'i') }, { category: new RegExp(q, 'i') }
+        { name: regex },
+        { sku: regex },
+        { category: regex }
       ];
     }
 
@@ -822,26 +981,30 @@ exports.getActiveLabSessions = async (req, res) => {
 exports.searchPendingTransactions = async (req, res) => {
   try {
     const labId = req.user.lab_id;
-    if (!labId) return res.status(403).json({ error: 'Lab access denied' });
- 
+    if (!labId || !isValidObjectId(labId)) {
+      return res.status(403).json({ error: 'Lab access denied' });
+    }
+
     const labObjectId = new mongoose.Types.ObjectId(String(labId));
     const { q, page = 1, limit = 25 } = req.query;
- 
-    const pageNum = Math.max(parseInt(page), 1);
-    const limitNum = Math.min(parseInt(limit), 100);
+
+    // Validate pagination
+    const pageNum = Math.max(parseInt(page) || 1, 1);
+    const limitNum = Math.min(Math.max(parseInt(limit) || 25, 1), 100);
     const skip = (pageNum - 1) * limitNum;
- 
+
     // Build prefix match filter at transaction level
     const matchStage = {
       status: { $in: ['approved', 'partial_issued'] },
       'items.lab_id': labObjectId
     };
- 
+
     if (q && q.trim().length > 0) {
-      const prefix = q.trim();
+      // Sanitize and escape regex input to prevent ReDoS
+      const sanitizedPrefix = escapeRegex(sanitizeText(q.trim(), 100));
       matchStage.$or = [
-        { transaction_id: { $regex: new RegExp(`^${prefix}`, 'i') } },
-        { student_reg_no: { $regex: new RegExp(`^${prefix}`, 'i') } }
+        { transaction_id: { $regex: new RegExp(`^${sanitizedPrefix}`, 'i') } },
+        { student_reg_no: { $regex: new RegExp(`^${sanitizedPrefix}`, 'i') } }
       ];
     }
  
@@ -950,25 +1113,29 @@ exports.searchPendingTransactions = async (req, res) => {
 exports.searchActiveTransactions = async (req, res) => {
   try {
     const labId = req.user.lab_id;
-    if (!labId) return res.status(403).json({ error: 'Lab access denied' });
- 
+    if (!labId || !isValidObjectId(labId)) {
+      return res.status(403).json({ error: 'Lab access denied' });
+    }
+
     const labObjectId = new mongoose.Types.ObjectId(String(labId));
     const { q, page = 1, limit = 25 } = req.query;
- 
-    const pageNum = Math.max(parseInt(page), 1);
-    const limitNum = Math.min(parseInt(limit), 100);
+
+    // Validate pagination
+    const pageNum = Math.max(parseInt(page) || 1, 1);
+    const limitNum = Math.min(Math.max(parseInt(limit) || 25, 1), 100);
     const skip = (pageNum - 1) * limitNum;
- 
+
     const matchStage = {
       status: { $in: ['active', 'partial_issued', 'partial_returned'] },
       'items.lab_id': labObjectId
     };
- 
+
     if (q && q.trim().length > 0) {
-      const prefix = q.trim();
+      // Sanitize and escape regex input to prevent ReDoS
+      const sanitizedPrefix = escapeRegex(sanitizeText(q.trim(), 100));
       matchStage.$or = [
-        { transaction_id: { $regex: new RegExp(`^${prefix}`, 'i') } },
-        { student_reg_no: { $regex: new RegExp(`^${prefix}`, 'i') } }
+        { transaction_id: { $regex: new RegExp(`^${sanitizedPrefix}`, 'i') } },
+        { student_reg_no: { $regex: new RegExp(`^${sanitizedPrefix}`, 'i') } }
       ];
     }
  

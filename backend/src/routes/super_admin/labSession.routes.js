@@ -1,8 +1,10 @@
 const express = require('express');
 const router = express.Router({ mergeParams: true });
 
-const auth = require('../../middlewares/auth.middleware');
-const role = require('../../middlewares/role.middleware');
+const {
+  validateObjectId,
+  validatePaginationParams
+} = require('../../middlewares/paramValidator.middleware');
 
 const {
   getLabSessions,
@@ -13,21 +15,20 @@ const {
 /* =====================================================
    SUPER ADMIN – LAB SESSION ROUTES
    Base: /api/super-admin/labs/:labId/lab-sessions
+   Auth applied at index.js level
 ===================================================== */
-
-router.use(auth, role('super_admin'));
 
 /* ============================
    GET ALL LAB SESSIONS
    GET /labs/:labId/lab-sessions
 ============================ */
-router.get('/', getLabSessions);
+router.get('/', validatePaginationParams, getLabSessions);
 
 /* ============================
    GET SINGLE LAB SESSION
    GET /labs/:labId/lab-sessions/:id
 ============================ */
-router.get('/:id', getLabSessionDetail);
+router.get('/:id', validateObjectId('id'), getLabSessionDetail);
 
 /* ============================
    GET AVAILABLE ITEMS FOR LAB

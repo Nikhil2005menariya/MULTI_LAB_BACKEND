@@ -1,8 +1,10 @@
 const express = require('express');
 const router = express.Router();
 
-const auth = require('../../middlewares/auth.middleware');
-const role = require('../../middlewares/role.middleware');
+const {
+  validatePaginationParams,
+  validateDateRange
+} = require('../../middlewares/paramValidator.middleware');
 
 const {
   getAnalyticsOverview,
@@ -13,24 +15,48 @@ const {
   getDamageReport,
 } = require('../../controllers/super_admin.controller');
 
-router.use(auth, role('super_admin'));
+/* =====================================================
+   SUPER ADMIN – ANALYTICS
+   Auth applied at index.js level
+===================================================== */
 
 // GET /api/super-admin/analytics/overview?labId=&startDate=&endDate=
-router.get('/overview', getAnalyticsOverview);
+router.get(
+  '/overview',
+  validateDateRange('startDate', 'endDate'),
+  getAnalyticsOverview
+);
 
 // POST /api/super-admin/analytics/transactions
-router.post('/transactions', getTransactionReport);
+router.post(
+  '/transactions',
+  validateDateRange('startDate', 'endDate'),
+  getTransactionReport
+);
 
 // POST /api/super-admin/analytics/items
 router.post('/items', getItemReport);
 
 // GET /api/super-admin/analytics/labs/compare?startDate=&endDate=
-router.get('/labs/compare', getLabComparison);
+router.get(
+  '/labs/compare',
+  validateDateRange('startDate', 'endDate'),
+  getLabComparison
+);
 
 // GET /api/super-admin/analytics/overdue?labId=&page=&limit=
-router.get('/overdue', getOverdueReport);
+router.get(
+  '/overdue',
+  validatePaginationParams,
+  getOverdueReport
+);
 
 // GET /api/super-admin/analytics/damage?labId=&startDate=&endDate=&page=&limit=
-router.get('/damage', getDamageReport);
+router.get(
+  '/damage',
+  validateDateRange('startDate', 'endDate'),
+  validatePaginationParams,
+  getDamageReport
+);
 
 module.exports = router;

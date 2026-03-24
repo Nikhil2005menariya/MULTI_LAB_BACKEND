@@ -4,6 +4,9 @@ const router = express.Router();
 const auth = require('../../middlewares/auth.middleware');
 const role = require('../../middlewares/role.middleware');
 const upload = require('../../middlewares/billUpload.middleware');
+const { validatePDFContent, handleUploadError } = require('../../middlewares/billUpload.middleware');
+const { validateObjectId } = require('../../middlewares/paramValidator.middleware');
+const { uploadLimiter } = require('../../middlewares/rateLimiter.middleware');
 
 const {
   uploadBill,
@@ -13,8 +16,13 @@ const {
 
 router.use(auth, role('incharge'));
 
-router.post('/', upload.single('file'), uploadBill);
+// Upload bill with rate limit and PDF validation
+router.post('/', uploadLimiter, upload.single('file'), handleUploadError, validatePDFContent, uploadBill);
+
+// Get all bills
 router.get('/', getBills);
-router.get('/:id/download', downloadBill);
+
+// Download bill by ID with validation
+router.get('/:id/download', validateObjectId('id'), downloadBill);
 
 module.exports = router;

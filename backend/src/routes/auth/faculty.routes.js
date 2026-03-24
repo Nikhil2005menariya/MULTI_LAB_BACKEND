@@ -1,6 +1,13 @@
 const express = require('express');
 const router = express.Router();
 
+const {
+  loginLimiter,
+  passwordResetLimiter,
+  registrationLimiter,
+  otpLimiter
+} = require('../../middlewares/rateLimiter.middleware');
+
 const facultyAuthController = require('../../controllers/auth.controller');
 
 /* ============================
@@ -8,18 +15,19 @@ const facultyAuthController = require('../../controllers/auth.controller');
 ============================ */
 
 // Register (send verification email)
-router.post('/register', facultyAuthController.registerFaculty);
+router.post('/register', registrationLimiter, facultyAuthController.registerFaculty);
 
 // Verify email
-router.get('/verify', facultyAuthController.verifyEmail);
+router.get('/verify', otpLimiter, facultyAuthController.verifyEmail);
 
 // Set password (after verification)
-router.post('/set-password', facultyAuthController.setPassword);
+router.post('/set-password', otpLimiter, facultyAuthController.setPassword);
 
 // Login
-router.post('/login', facultyAuthController.loginFaculty);
+router.post('/login', loginLimiter, facultyAuthController.loginFaculty);
 
-router.post('/forgot-password', facultyAuthController.facultyForgotPassword);
-router.post('/reset-password', facultyAuthController.facultyResetPassword);
+// Password reset flows
+router.post('/forgot-password', passwordResetLimiter, facultyAuthController.facultyForgotPassword);
+router.post('/reset-password', passwordResetLimiter, facultyAuthController.facultyResetPassword);
 
 module.exports = router;

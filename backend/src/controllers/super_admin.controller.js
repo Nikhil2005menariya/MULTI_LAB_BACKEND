@@ -12,6 +12,48 @@ const adminController = require('./admin.controller');
 const { sendMail } = require('../services/mail.service');
 
 /* =====================================================
+   INPUT VALIDATION & SANITIZATION
+===================================================== */
+
+const EMAIL_REGEX = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
+const NAME_REGEX = /^[a-zA-Z\s.'-]{2,100}$/;
+const LAB_CODE_REGEX = /^[A-Z0-9_-]{2,20}$/;
+
+const isValidEmail = (email) => {
+  if (!email || typeof email !== 'string') return false;
+  return EMAIL_REGEX.test(email) && email.length <= 254;
+};
+
+const isValidName = (name) => {
+  if (!name || typeof name !== 'string') return false;
+  return NAME_REGEX.test(name.trim());
+};
+
+const isValidObjectId = (id) => {
+  return mongoose.Types.ObjectId.isValid(id);
+};
+
+const escapeRegex = (str) => {
+  if (!str || typeof str !== 'string') return '';
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+};
+
+const sanitizeText = (text, maxLength = 1000) => {
+  if (!text || typeof text !== 'string') return '';
+  return text.replace(/<[^>]*>/g, '').trim().substring(0, maxLength);
+};
+
+const escapeHtml = (str) => {
+  if (!str || typeof str !== 'string') return '';
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+};
+
+/* =====================================================
    HELPER: Validate Lab Exists
 ===================================================== */
 const validateLab = async (labId) => {
@@ -43,6 +85,12 @@ const buildExistingStaffEmail = ({ name, email, role, labName, labCode, frontend
   const roleGradientTo = role === 'incharge' ? '#5b21b6' : '#1d4ed8';
   const roleEmoji = role === 'incharge' ? '👨‍💼' : '🔧';
 
+  // Escape user content for XSS prevention
+  const escapedName = escapeHtml(name);
+  const escapedEmail = escapeHtml(email);
+  const escapedLabName = escapeHtml(labName);
+  const escapedLabCode = escapeHtml(labCode);
+
   return `<!DOCTYPE html>
 <html>
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
@@ -60,7 +108,7 @@ const buildExistingStaffEmail = ({ name, email, role, labName, labCode, frontend
       </tr></table>
     </div>
     <div style="padding:32px 36px 24px;">
-      <p style="margin:0 0 6px;color:#1e293b;font-size:15px;">Hello <strong>${name}</strong>,</p>
+      <p style="margin:0 0 6px;color:#1e293b;font-size:15px;">Hello <strong>${escapedName}</strong>,</p>
       <p style="margin:0 0 24px;color:#475569;font-size:14px;line-height:1.75;">You have been assigned a new role in the Lab Management System.</p>
       <div style="background:linear-gradient(135deg,${roleGradientFrom}12,${roleGradientTo}08);border:1px solid ${roleColor}30;border-radius:12px;padding:20px 24px;margin-bottom:24px;">
         <table style="width:100%;border-collapse:collapse;">
@@ -71,15 +119,15 @@ const buildExistingStaffEmail = ({ name, email, role, labName, labCode, frontend
           <tr><td style="padding-top:14px;">
             <p style="margin:0;font-size:11px;color:#64748b;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;">Assigned Lab</p>
             <p style="margin:6px 0 0;font-size:16px;font-weight:700;color:#0f172a;">
-              ${labName}
-              <span style="margin-left:8px;background:${roleColor}15;color:${roleColor};font-size:11px;font-weight:700;padding:2px 8px;border-radius:6px;font-family:monospace;">${labCode}</span>
+              ${escapedLabName}
+              <span style="margin-left:8px;background:${roleColor}15;color:${roleColor};font-size:11px;font-weight:700;padding:2px 8px;border-radius:6px;font-family:monospace;">${escapedLabCode}</span>
             </p>
           </td></tr>
         </table>
       </div>
       <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:16px 18px;margin-bottom:24px;">
         <p style="margin:0 0 4px;font-size:12px;color:#15803d;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;">✅ You Already Have an Account</p>
-        <p style="margin:0;font-size:13px;color:#166534;line-height:1.7;">Your existing account (<strong>${email}</strong>) has been updated with this new role. Use your current credentials to log in.</p>
+        <p style="margin:0;font-size:13px;color:#166534;line-height:1.7;">Your existing account (<strong>${escapedEmail}</strong>) has been updated with this new role. Use your current credentials to log in.</p>
       </div>
       <div style="text-align:center;margin-bottom:24px;">
         <a href="${frontendUrl}/login" style="display:inline-block;background:linear-gradient(135deg,${roleGradientFrom},${roleGradientTo});color:#ffffff;text-decoration:none;font-size:15px;font-weight:700;padding:14px 40px;border-radius:10px;">Log In to Your Account →</a>
@@ -103,6 +151,12 @@ const buildNewStaffEmail = ({ name, email, role, labName, labCode, tempPassword,
   const roleGradientTo = role === 'incharge' ? '#5b21b6' : '#1d4ed8';
   const roleEmoji = role === 'incharge' ? '👨‍💼' : '🔧';
 
+  // Escape user content for XSS prevention
+  const escapedName = escapeHtml(name);
+  const escapedEmail = escapeHtml(email);
+  const escapedLabName = escapeHtml(labName);
+  const escapedLabCode = escapeHtml(labCode);
+
   return `<!DOCTYPE html>
 <html>
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
@@ -120,7 +174,7 @@ const buildNewStaffEmail = ({ name, email, role, labName, labCode, tempPassword,
       </tr></table>
     </div>
     <div style="padding:32px 36px 24px;">
-      <p style="margin:0 0 6px;color:#1e293b;font-size:15px;">Hello <strong>${name}</strong>,</p>
+      <p style="margin:0 0 6px;color:#1e293b;font-size:15px;">Hello <strong>${escapedName}</strong>,</p>
       <p style="margin:0 0 24px;color:#475569;font-size:14px;line-height:1.75;">Welcome to the Lab Management System! An account has been created for you.</p>
       <div style="background:linear-gradient(135deg,${roleGradientFrom}12,${roleGradientTo}08);border:1px solid ${roleColor}30;border-radius:12px;padding:20px 24px;margin-bottom:24px;">
         <table style="width:100%;border-collapse:collapse;">
@@ -131,8 +185,8 @@ const buildNewStaffEmail = ({ name, email, role, labName, labCode, tempPassword,
           <tr><td style="padding-top:14px;">
             <p style="margin:0;font-size:11px;color:#64748b;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;">Assigned Lab</p>
             <p style="margin:6px 0 0;font-size:16px;font-weight:700;color:#0f172a;">
-              ${labName}
-              <span style="margin-left:8px;background:${roleColor}15;color:${roleColor};font-size:11px;font-weight:700;padding:2px 8px;border-radius:6px;font-family:monospace;">${labCode}</span>
+              ${escapedLabName}
+              <span style="margin-left:8px;background:${roleColor}15;color:${roleColor};font-size:11px;font-weight:700;padding:2px 8px;border-radius:6px;font-family:monospace;">${escapedLabCode}</span>
             </p>
           </td></tr>
         </table>
@@ -141,7 +195,7 @@ const buildNewStaffEmail = ({ name, email, role, labName, labCode, tempPassword,
       <table style="width:100%;border-collapse:collapse;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;margin-bottom:20px;">
         <tr style="border-bottom:1px solid #f1f5f9;">
           <td style="padding:12px 16px;background:#f8fafc;font-size:12px;color:#64748b;font-weight:600;width:35%;text-transform:uppercase;">Email</td>
-          <td style="padding:12px 16px;font-size:14px;color:#0f172a;font-weight:600;font-family:monospace;">${email}</td>
+          <td style="padding:12px 16px;font-size:14px;color:#0f172a;font-weight:600;font-family:monospace;">${escapedEmail}</td>
         </tr>
         <tr>
           <td style="padding:12px 16px;background:#f8fafc;font-size:12px;color:#64748b;font-weight:600;text-transform:uppercase;">Temp Password</td>
@@ -208,7 +262,7 @@ const assignOrCreateStaff = async ({ name, email, role, labId, lab }) => {
   }
 
   const tempPassword = generateTempPassword();
-  const hashedPassword = await bcrypt.hash(tempPassword, 10);
+  const hashedPassword = await bcrypt.hash(tempPassword, 12);
 
   const newStaff = await Staff.create({
     name, email: email.toLowerCase(), password: hashedPassword,
@@ -267,22 +321,54 @@ exports.createLab = async (req, res) => {
       return res.status(400).json({ error: 'Name and code are required' });
     }
 
-    const exists = await Lab.findOne({ $or: [{ name }, { code }] });
+    // Sanitize inputs
+    const sanitizedName = sanitizeText(name, 100);
+    const sanitizedCode = sanitizeText(code, 20).toUpperCase();
+    const sanitizedLocation = sanitizeText(location, 200);
+
+    // Validate lab code format
+    if (!LAB_CODE_REGEX.test(sanitizedCode)) {
+      return res.status(400).json({
+        error: 'Lab code must be 2-20 characters, uppercase letters, numbers, underscores, or hyphens'
+      });
+    }
+
+    // Validate emails if provided
+    if (incharge_email && !isValidEmail(incharge_email)) {
+      return res.status(400).json({ error: 'Invalid incharge email format' });
+    }
+    if (assistant_email && !isValidEmail(assistant_email)) {
+      return res.status(400).json({ error: 'Invalid assistant email format' });
+    }
+
+    // Validate names if provided
+    if (incharge_name && !isValidName(incharge_name)) {
+      return res.status(400).json({
+        error: 'Invalid incharge name format. Use only letters, spaces, dots, hyphens, and apostrophes'
+      });
+    }
+    if (assistant_name && !isValidName(assistant_name)) {
+      return res.status(400).json({
+        error: 'Invalid assistant name format. Use only letters, spaces, dots, hyphens, and apostrophes'
+      });
+    }
+
+    const exists = await Lab.findOne({ $or: [{ name: sanitizedName }, { code: sanitizedCode }] });
     if (exists) {
       return res.status(400).json({ error: 'Lab with same name or code already exists' });
     }
 
     const lab = await Lab.create({
-      name: name.trim(),
-      code: code.trim().toUpperCase(),
-      location
+      name: sanitizedName,
+      code: sanitizedCode,
+      location: sanitizedLocation
     });
 
     const created = { lab };
 
     if (incharge_name && incharge_email) {
       const { staff, isNew } = await assignOrCreateStaff({
-        name: incharge_name, email: incharge_email,
+        name: incharge_name.trim(), email: incharge_email,
         role: 'incharge', labId: lab._id, lab
       });
       created.incharge = { staff, isNew };
@@ -290,7 +376,7 @@ exports.createLab = async (req, res) => {
 
     if (assistant_name && assistant_email) {
       const { staff, isNew } = await assignOrCreateStaff({
-        name: assistant_name, email: assistant_email,
+        name: assistant_name.trim(), email: assistant_email,
         role: 'assistant', labId: lab._id, lab
       });
       created.assistant = { staff, isNew };
@@ -434,10 +520,27 @@ exports.addAssistant = async (req, res) => {
       return res.status(400).json({ error: 'Name and email are required' });
     }
 
+    // Validate labId
+    if (!isValidObjectId(labId)) {
+      return res.status(400).json({ error: 'Invalid lab ID format' });
+    }
+
+    // Validate email format
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ error: 'Invalid email format' });
+    }
+
+    // Validate name format
+    if (!isValidName(name)) {
+      return res.status(400).json({
+        error: 'Invalid name format. Use only letters, spaces, dots, hyphens, and apostrophes (2-100 characters)'
+      });
+    }
+
     const lab = await validateLab(labId);
     if (!lab) return res.status(404).json({ error: 'Invalid lab' });
 
-    const { staff, isNew } = await assignOrCreateStaff({ name, email, role: 'assistant', labId, lab });
+    const { staff, isNew } = await assignOrCreateStaff({ name: name.trim(), email, role: 'assistant', labId, lab });
 
     return res.status(isNew ? 201 : 200).json({
       success: true, isNew,
@@ -487,6 +590,23 @@ exports.changeIncharge = async (req, res) => {
       return res.status(400).json({ error: 'Name and email are required' });
     }
 
+    // Validate labId
+    if (!isValidObjectId(labId)) {
+      return res.status(400).json({ error: 'Invalid lab ID format' });
+    }
+
+    // Validate email format
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ error: 'Invalid email format' });
+    }
+
+    // Validate name format
+    if (!isValidName(name)) {
+      return res.status(400).json({
+        error: 'Invalid name format. Use only letters, spaces, dots, hyphens, and apostrophes (2-100 characters)'
+      });
+    }
+
     const lab = await validateLab(labId);
     if (!lab) return res.status(404).json({ error: 'Invalid lab' });
 
@@ -496,7 +616,7 @@ exports.changeIncharge = async (req, res) => {
       { $set: { is_active: false, lab_id: null } }
     );
 
-    const { staff, isNew } = await assignOrCreateStaff({ name, email, role: 'incharge', labId, lab });
+    const { staff, isNew } = await assignOrCreateStaff({ name: name.trim(), email, role: 'incharge', labId, lab });
 
     return res.status(isNew ? 201 : 200).json({
       success: true, isNew,
@@ -771,8 +891,8 @@ exports.getTransactionReport = async (req, res) => {
     if (startDate || endDate) Object.assign(matchStage, dateRangeMatch(startDate, endDate));
     if (status)           matchStage.status = status;
     if (transaction_type) matchStage.transaction_type = transaction_type;
-    if (student_reg_no)   matchStage.student_reg_no = new RegExp(student_reg_no, 'i');
-    if (faculty_email)    matchStage.faculty_email = new RegExp(faculty_email, 'i');
+    if (student_reg_no)   matchStage.student_reg_no = new RegExp(escapeRegex(student_reg_no), 'i');
+    if (faculty_email)    matchStage.faculty_email = new RegExp(escapeRegex(faculty_email), 'i');
 
     const pipeline = [];
     if (Object.keys(matchStage).length > 0) pipeline.push({ $match: matchStage });
@@ -871,7 +991,7 @@ exports.getItemReport = async (req, res) => {
     ]);
 
     const itemFilter = { is_active: true };
-    if (category) itemFilter.category = new RegExp(category, 'i');
+    if (category) itemFilter.category = new RegExp(escapeRegex(category), 'i');
     if (tracking_type) itemFilter.tracking_type = tracking_type;
 
     const inventoryFilter = labId ? { lab_id: new mongoose.Types.ObjectId(labId) } : {};
@@ -1160,9 +1280,10 @@ exports.searchTransactions = async (req, res) => {
     // Base filter — must involve this lab
     const matchStage = { 'items.lab_id': labObjectId };
 
-    // Prefix match on transaction_id OR student_reg_no
+    // Prefix match on transaction_id OR student_reg_no with ReDoS protection
     if (q && q.trim().length > 0) {
-      const regex = new RegExp(`^${q.trim()}`, 'i');
+      const escapedQ = escapeRegex(q.trim());
+      const regex = new RegExp(`^${escapedQ}`, 'i');
       matchStage.$or = [
         { transaction_id: regex },
         { student_reg_no: regex }

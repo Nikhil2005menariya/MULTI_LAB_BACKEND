@@ -1,8 +1,10 @@
 const express = require('express');
 const router = express.Router({ mergeParams: true });
 
-const auth = require('../../middlewares/auth.middleware');
-const role = require('../../middlewares/role.middleware');
+const {
+  validateObjectId,
+  validatePaginationParams
+} = require('../../middlewares/paramValidator.middleware');
 
 const {
   getAllComponentRequests,
@@ -11,14 +13,13 @@ const {
 
 /* =====================================================
    SUPER ADMIN – COMPONENT REQUESTS
+   Auth applied at index.js level
 ===================================================== */
 
-router.use(auth, role('super_admin'));
-
 /* Get all requests */
-router.get('/', getAllComponentRequests);
+router.get('/', validatePaginationParams, getAllComponentRequests);
 
 /* Get single request */
-router.get('/:id', getComponentRequestById);
+router.get('/:id', validateObjectId('id'), getComponentRequestById);
 
 module.exports = router;

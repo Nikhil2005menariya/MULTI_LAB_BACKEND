@@ -1,8 +1,10 @@
 const express = require('express');
 const router = express.Router();
 
-const auth = require('../../middlewares/auth.middleware');
-const role = require('../../middlewares/role.middleware');
+const {
+  validateObjectId,
+  validatePaginationParams
+} = require('../../middlewares/paramValidator.middleware');
 
 const {
   raiseTransaction,
@@ -14,10 +16,8 @@ const {
 /* =====================================================
    STUDENT TRANSACTION ROUTES
    Base Path: /api/student/transactions
+   Auth applied at index.js level
 ===================================================== */
-
-// 🔐 Student-only access
-router.use(auth, role('student'));
 
 /* ============================
    RAISE NEW TRANSACTION
@@ -29,14 +29,26 @@ router.post('/', raiseTransaction);
    GET MY TRANSACTION HISTORY
    GET /api/student/transactions/my
 ============================ */
-router.get('/my', getMyTransactions);
+router.get('/my', validatePaginationParams, getMyTransactions);
 
 /* ============================
    GET TRANSACTION BY ID
    GET /api/student/transactions/:transaction_id
 ============================ */
-router.get('/:transaction_id', getTransactionById);
+router.get(
+  '/:transaction_id',
+  validateObjectId('transaction_id'),
+  getTransactionById
+);
 
+/* ============================
+   EXTEND RETURN DATE
+   PATCH /api/student/transactions/:transaction_id/extend
+============================ */
+router.patch(
+  '/:transaction_id/extend',
+  validateObjectId('transaction_id'),
+  extendReturnDate
+);
 
-router.patch('/:transaction_id/extend', extendReturnDate);
 module.exports = router;

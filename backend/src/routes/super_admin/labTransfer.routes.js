@@ -1,8 +1,10 @@
 const express = require('express');
 const router = express.Router({ mergeParams: true });
 
-const auth = require('../../middlewares/auth.middleware');
-const role = require('../../middlewares/role.middleware');
+const {
+  validateObjectId,
+  validatePaginationParams
+} = require('../../middlewares/paramValidator.middleware');
 
 const {
   getLabTransfers,
@@ -14,25 +16,20 @@ const {
 /* =====================================================
    SUPER ADMIN – LAB TRANSFER ROUTES
    Base: /api/super-admin/labs/:labId/transfers
+   Auth applied at index.js level
 ===================================================== */
-
-router.use(auth, role('super_admin'));
 
 /* ============================
    GET ALL LAB TRANSFERS
    (Incoming + Outgoing)
    GET /labs/:labId/transfers
 ============================ */
-router.get('/', getLabTransfers);
+router.get('/', validatePaginationParams, getLabTransfers);
 
-/* ============================
-   GET INCOMING TRANSFERS
-   GET /labs/:labId/transfers/incoming
-============================ */
 /* ============================
    GET SINGLE TRANSFER
    GET /labs/:labId/transfers/:id
 ============================ */
-router.get('/:id', getLabTransferDetail);
+router.get('/:id', validateObjectId('id'), getLabTransferDetail);
 
 module.exports = router;

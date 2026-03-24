@@ -1,8 +1,11 @@
 const express = require('express');
 const router = express.Router({ mergeParams: true });
 
-const auth = require('../../middlewares/auth.middleware');
-const role = require('../../middlewares/role.middleware');
+const {
+  validateObjectId,
+  validatePaginationParams,
+  sanitizeSearch
+} = require('../../middlewares/paramValidator.middleware');
 
 const {
   getAllItems,
@@ -14,20 +17,24 @@ const {
 /* =====================================================
    SUPER ADMIN – INVENTORY
    Base: /api/super-admin/labs/:labId/items
+   Auth applied at index.js level
 ===================================================== */
 
-router.use(auth, role('super_admin'));
-
 /* Get all items */
-router.get('/', getAllItems);
+router.get(
+  '/',
+  sanitizeSearch(['q', 'query', 'search']),
+  validatePaginationParams,
+  getAllItems
+);
 
 /* Get available items */
-router.get('/available', getLabAvailableItems);
+router.get('/available', validatePaginationParams, getLabAvailableItems);
 
 /* Get single item */
-router.get('/:id', getItemById);
+router.get('/:id', validateObjectId('id'), getItemById);
 
 /* Get item assets */
-router.get('/:id/assets', getItemAssets);
+router.get('/:id/assets', validateObjectId('id'), getItemAssets);
 
 module.exports = router;

@@ -1,8 +1,10 @@
 const express = require('express');
 const router = express.Router({ mergeParams: true });
 
-const auth = require('../../middlewares/auth.middleware');
-const role = require('../../middlewares/role.middleware');
+const {
+  validatePaginationParams,
+  sanitizeSearch
+} = require('../../middlewares/paramValidator.middleware');
 
 const {
   getTransactionHistory,
@@ -13,26 +15,30 @@ const {
 /* =====================================================
    SUPER ADMIN – LAB TRANSACTIONS
    Base: /api/super-admin/labs/:labId/transactions
+   Auth applied at index.js level
 ===================================================== */
-
-router.use(auth, role('super_admin'));
 
 /* ============================
    GET ALL TRANSACTIONS
    GET /labs/:labId/transactions
 ============================ */
-router.get('/', getTransactionHistory);
+router.get('/', validatePaginationParams, getTransactionHistory);
 
 /* ============================
    SEARCH TRANSACTIONS
    GET /labs/:labId/transactions/search
 ============================ */
-router.get('/search', searchTransactions);
+router.get(
+  '/search',
+  sanitizeSearch(['q', 'query', 'search']),
+  validatePaginationParams,
+  searchTransactions
+);
 
 /* ============================
    GET OVERDUE TRANSACTIONS
    GET /labs/:labId/transactions/overdue
 ============================ */
-router.get('/overdue', getOverdueTransactions);
+router.get('/overdue', validatePaginationParams, getOverdueTransactions);
 
 module.exports = router;

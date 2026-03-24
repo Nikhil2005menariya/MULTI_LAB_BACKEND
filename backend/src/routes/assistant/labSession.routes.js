@@ -1,8 +1,11 @@
 const express = require('express');
 const router = express.Router();
 
-const auth = require('../../middlewares/auth.middleware');
-const role = require('../../middlewares/role.middleware');
+const {
+  validateObjectId,
+  sanitizeSearch,
+  validatePaginationParams
+} = require('../../middlewares/paramValidator.middleware');
 
 const {
   issueLabSession,
@@ -15,22 +18,25 @@ const {
 /* =====================================================
    ASSISTANT LAB SESSION ROUTES
    Base Path: /api/assistant/lab-sessions
+   Auth applied at index.js level
 ===================================================== */
-
-// 🔐 Assistant only
-router.use(auth, role('assistant'));
 
 /* ============================
    GET RESERVED ITEMS (LAB)
    GET /api/assistant/lab-sessions/items
 ============================ */
-router.get('/items', getAvailableLabItems);
+router.get('/items', validatePaginationParams, getAvailableLabItems);
 
 /* ============================
    SEARCH RESERVED ITEMS
    GET /api/assistant/lab-sessions/items/search?q=...
 ============================ */
-router.get('/items/search', searchLabItems);
+router.get(
+  '/items/search',
+  sanitizeSearch(['q', 'query', 'search']),
+  validatePaginationParams,
+  searchLabItems
+);
 
 /* ============================
    ISSUE LAB SESSION
@@ -42,12 +48,16 @@ router.post('/issue', issueLabSession);
    GET ACTIVE LAB SESSIONS
    GET /api/assistant/lab-sessions/active
 ============================ */
-router.get('/active', getActiveLabSessions);
+router.get('/active', validatePaginationParams, getActiveLabSessions);
 
 /* ============================
    RETURN LAB SESSION
    POST /api/assistant/lab-sessions/:transaction_id/return
 ============================ */
-router.post('/:transaction_id/return', returnTransaction);
+router.post(
+  '/:transaction_id/return',
+  validateObjectId('transaction_id'),
+  returnTransaction
+);
 
 module.exports = router;

@@ -6,34 +6,118 @@ const { sendMail } = require('../services/mail.service');
 const Student = require('../models/Student');
 const Faculty = require('../models/Faculty');
 
+/* =====================================================
+   SECURITY: Validation & Sanitization Helpers
+===================================================== */
+const BCRYPT_ROUNDS = 12;
+const PASSWORD_MIN_LENGTH = 8;
+const EMAIL_REGEX = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+const NAME_REGEX = /^[a-zA-Z\s.'-]{2,100}$/;
+const HEX_TOKEN_REGEX = /^[a-fA-F0-9]{64}$/;
+const OTP_REGEX = /^[0-9]{6}$/;
+const REG_NO_REGEX = /^[a-zA-Z0-9]{3,20}$/;
+const FACULTY_ID_REGEX = /^[a-zA-Z0-9-]{2,50}$/;
+
+const isValidEmail = (email) => {
+  if (!email || typeof email !== 'string') return false;
+  if (email.length > 254) return false;
+  return EMAIL_REGEX.test(email);
+};
+
+const isValidName = (name) => {
+  if (!name || typeof name !== 'string') return false;
+  return NAME_REGEX.test(name);
+};
+
+const isValidPassword = (password) => {
+  if (!password || typeof password !== 'string') return false;
+  if (password.length < PASSWORD_MIN_LENGTH || password.length > 128) return false;
+  const hasUpperCase = /[A-Z]/.test(password);
+  const hasLowerCase = /[a-z]/.test(password);
+  const hasNumber = /[0-9]/.test(password);
+  return hasUpperCase && hasLowerCase && hasNumber;
+};
+
+const isValidHexToken = (token) => {
+  if (!token || typeof token !== 'string') return false;
+  return HEX_TOKEN_REGEX.test(token);
+};
+
+const isValidOTP = (otp) => {
+  if (!otp || typeof otp !== 'string') return false;
+  return OTP_REGEX.test(otp);
+};
+
+const isValidRegNo = (regNo) => {
+  if (!regNo || typeof regNo !== 'string') return false;
+  return REG_NO_REGEX.test(regNo);
+};
+
+const isValidFacultyId = (facultyId) => {
+  if (!facultyId || typeof facultyId !== 'string') return false;
+  return FACULTY_ID_REGEX.test(facultyId);
+};
+
+const escapeHtml = (str) => {
+  if (!str || typeof str !== 'string') return '';
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+};
+
+const timingSafeEqual = (a, b) => {
+  if (!a || !b || typeof a !== 'string' || typeof b !== 'string') return false;
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
+};
+
 /* ======================
    STUDENT LOGIN
 ====================== */
 
 exports.studentLogin = async (req, res) => {
-  const { reg_no, password } = req.body;
+  try {
+    const { reg_no, password } = req.body;
 
-  const student = await Student.findOne({ reg_no }).select('+password');
-  if (!student) {
-    return res.status(401).json({ error: 'Invalid credentials' });
+    if (!reg_no || !password) {
+      return res.status(400).json({ error: 'Registration number and password are required' });
+    }
+
+    if (!isValidRegNo(reg_no)) {
+      return res.status(400).json({ error: 'Invalid registration number format' });
+    }
+
+    if (typeof password !== 'string' || password.length > 128) {
+      return res.status(400).json({ error: 'Invalid password format' });
+    }
+
+    const student = await Student.findOne({ reg_no }).select('+password');
+    if (!student) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    if (!student.is_verified) {
+      return res.status(403).json({ error: 'Email not verified' });
+    }
+
+    const isMatch = await bcrypt.compare(password, student.password);
+    if (!isMatch) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    const token = jwt.sign(
+      { id: student._id, role: 'student' },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRES_IN }
+    );
+
+    res.json({ token });
+  } catch (err) {
+    console.error('Student login error:', err);
+    return res.status(500).json({ error: 'Login failed' });
   }
-  if (!student.is_verified) {
-  return res.status(403).json({ error: 'Email not verified' });
-  }
-
-
-  const isMatch = await require('bcryptjs').compare(password, student.password);
-  if (!isMatch) {
-    return res.status(401).json({ error: 'Invalid credentials' });
-  }
-
-  const token = require('jsonwebtoken').sign(
-    { id: student._id, role: 'student' },
-    process.env.JWT_SECRET,
-    { expiresIn: process.env.JWT_EXPIRES_IN }
-  );
-
-  res.json({ token });
 };
 
 // student account creation
@@ -42,6 +126,30 @@ exports.studentLogin = async (req, res) => {
 exports.registerStudent = async (req, res) => {
   try {
     const { name, reg_no, email, password } = req.body;
+
+    if (!name || !reg_no || !email || !password) {
+      return res.status(400).json({ error: 'All fields are required' });
+    }
+
+    if (!isValidName(name)) {
+      return res.status(400).json({
+        error: 'Invalid name format. Use only letters, spaces, dots, hyphens, and apostrophes (2-100 characters)'
+      });
+    }
+
+    if (!isValidRegNo(reg_no)) {
+      return res.status(400).json({ error: 'Invalid registration number format' });
+    }
+
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ error: 'Invalid email format' });
+    }
+
+    if (!isValidPassword(password)) {
+      return res.status(400).json({
+        error: 'Password must be 8-128 characters with at least one uppercase, one lowercase, and one number'
+      });
+    }
 
     const exists = await Student.findOne({
       $or: [{ reg_no }, { email }]
@@ -57,16 +165,19 @@ exports.registerStudent = async (req, res) => {
       name,
       reg_no,
       email,
-      password: await bcrypt.hash(password, 10),
+      password: await bcrypt.hash(password, BCRYPT_ROUNDS),
       email_verification_token: verificationToken
     });
 
     const verifyLink = `${process.env.FRONTEND_URL}/verify-email?token=${verificationToken}`;
 
+    const escapedName = escapeHtml(name);
+
     await sendMail({
       to: email,
       subject: 'Verify your IoT Lab Account',
       html: `
+        <p>Hello ${escapedName},</p>
         <p>Click the link below to verify your account:</p>
         <a href="${verifyLink}">Verify Email</a>
       `
@@ -77,7 +188,8 @@ exports.registerStudent = async (req, res) => {
       message: 'Registration successful. Verify email to login.'
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Student registration error:', err);
+    res.status(500).json({ error: 'Registration failed' });
   }
 };
 
@@ -85,6 +197,10 @@ exports.registerStudent = async (req, res) => {
 exports.verifyStudentEmail = async (req, res) => {
   try {
     const { token } = req.query;
+
+    if (!isValidHexToken(token)) {
+      return res.status(400).json({ error: 'Invalid verification token format' });
+    }
 
     const student = await Student.findOne({
       email_verification_token: token
@@ -104,7 +220,8 @@ exports.verifyStudentEmail = async (req, res) => {
       message: 'Email verified successfully'
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Student email verification error:', err);
+    res.status(500).json({ error: 'Verification failed' });
   }
 };
 
@@ -119,6 +236,12 @@ exports.studentForgotPassword = async (req, res) => {
     if (!email) {
       return res.status(400).json({
         error: 'Email is required'
+      });
+    }
+
+    if (!isValidEmail(email)) {
+      return res.status(400).json({
+        error: 'Invalid email format'
       });
     }
 
@@ -137,11 +260,13 @@ exports.studentForgotPassword = async (req, res) => {
 
     await student.save();
 
+    const escapedName = escapeHtml(student.name);
+
     await sendMail({
       to: student.email,
       subject: 'Student Password Reset OTP',
       html: `
-        <p>Hello ${student.name},</p>
+        <p>Hello ${escapedName},</p>
         <p>Your password reset OTP is:</p>
         <h2>${otp}</h2>
         <p>This OTP expires in 15 minutes.</p>
@@ -170,18 +295,27 @@ exports.studentResetPassword = async (req, res) => {
       return res.status(400).json({ message: 'Invalid request' });
     }
 
+    if (!isValidOTP(token)) {
+      return res.status(400).json({ message: 'Invalid OTP format' });
+    }
+
+    if (!isValidPassword(password)) {
+      return res.status(400).json({
+        message: 'Password must be 8-128 characters with at least one uppercase, one lowercase, and one number'
+      });
+    }
+
     const student = await Student.findOne({
-      reset_otp: token,
       reset_otp_expiry: { $gt: Date.now() }
     }).select('+reset_otp +reset_otp_expiry');
 
-    if (!student) {
+    if (!student || !timingSafeEqual(student.reset_otp, token)) {
       return res.status(400).json({
         message: 'Invalid or expired reset link'
       });
     }
 
-    student.password = await bcrypt.hash(password, 10);
+    student.password = await bcrypt.hash(password, BCRYPT_ROUNDS);
     student.reset_otp = null;
     student.reset_otp_expiry = null;
 
@@ -205,6 +339,14 @@ exports.staffLogin = async (req, res) => {
       return res.status(400).json({
         error: 'Email and password are required'
       });
+    }
+
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ error: 'Invalid email format' });
+    }
+
+    if (typeof password !== 'string' || password.length > 128) {
+      return res.status(400).json({ error: 'Invalid password format' });
     }
 
     const staff = await Staff.findOne({
@@ -266,12 +408,19 @@ exports.registerFaculty = async (req, res) => {
       return res.status(400).json({ message: 'Missing required fields' });
     }
 
-    // Optional domain restriction
-    // if (!email.endsWith('@vit.ac.in')) {
-    //   return res.status(400).json({
-    //     message: 'Only official VIT email is allowed'
-    //   });
-    // }
+    if (!isValidName(name)) {
+      return res.status(400).json({
+        message: 'Invalid name format. Use only letters, spaces, dots, hyphens, and apostrophes (2-100 characters)'
+      });
+    }
+
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ message: 'Invalid email format' });
+    }
+
+    if (!isValidFacultyId(faculty_id)) {
+      return res.status(400).json({ message: 'Invalid faculty ID format' });
+    }
 
     const existing = await Faculty.findOne({ email });
 
@@ -295,11 +444,13 @@ exports.registerFaculty = async (req, res) => {
     const verificationLink =
       `${process.env.FRONTEND_URL}/faculty/verify?token=${verificationToken}`;
 
+    const escapedName = escapeHtml(name);
+
     await sendMail({
       to: email,
       subject: 'Verify Your Faculty Account',
       html: `
-        <p>Hello ${name},</p>
+        <p>Hello ${escapedName},</p>
         <p>Please verify your faculty account by clicking the link below:</p>
         <a href="${verificationLink}">Verify Account</a>
       `
@@ -326,6 +477,10 @@ exports.verifyEmail = async (req, res) => {
 
     if (!token) {
       return res.status(400).json({ message: 'Verification token missing' });
+    }
+
+    if (!isValidHexToken(token)) {
+      return res.status(400).json({ message: 'Invalid token format' });
     }
 
     const faculty = await Faculty.findOne({
@@ -367,6 +522,16 @@ exports.setPassword = async (req, res) => {
       return res.status(400).json({ message: 'Missing fields' });
     }
 
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ message: 'Invalid email format' });
+    }
+
+    if (!isValidPassword(password)) {
+      return res.status(400).json({
+        message: 'Password must be 8-128 characters with at least one uppercase, one lowercase, and one number'
+      });
+    }
+
     const faculty = await Faculty.findOne({ email });
 
     if (!faculty || !faculty.is_verified) {
@@ -381,7 +546,7 @@ exports.setPassword = async (req, res) => {
       });
     }
 
-    const hashed = await bcrypt.hash(password, 10);
+    const hashed = await bcrypt.hash(password, BCRYPT_ROUNDS);
 
     faculty.password = hashed;
     await faculty.save();
@@ -406,6 +571,18 @@ exports.loginFaculty = async (req, res) => {
   try {
     const { email, password } = req.body;
 
+    if (!email || !password) {
+      return res.status(400).json({ message: 'Email and password are required' });
+    }
+
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ message: 'Invalid email format' });
+    }
+
+    if (typeof password !== 'string' || password.length > 128) {
+      return res.status(400).json({ message: 'Invalid password format' });
+    }
+
     const faculty = await Faculty.findOne({ email }).select('+password');
 
     if (!faculty || !faculty.is_verified) {
@@ -425,7 +602,7 @@ exports.loginFaculty = async (req, res) => {
     faculty.last_login = new Date();
     await faculty.save();
 
-    const token = require('jsonwebtoken').sign(
+    const token = jwt.sign(
       {
         id: faculty._id,
         role: 'faculty'
@@ -453,9 +630,6 @@ exports.loginFaculty = async (req, res) => {
 
 
 /* =====================================================
-   FACULTY FORGOT PASSWORD – SEND OTP
-===================================================== */
-/* =====================================================
    FACULTY FORGOT PASSWORD – STRICT CHECK
 ===================================================== */
 exports.facultyForgotPassword = async (req, res) => {
@@ -465,6 +639,12 @@ exports.facultyForgotPassword = async (req, res) => {
     if (!email) {
       return res.status(400).json({
         error: 'Email is required'
+      });
+    }
+
+    if (!isValidEmail(email)) {
+      return res.status(400).json({
+        error: 'Invalid email format'
       });
     }
 
@@ -489,11 +669,13 @@ exports.facultyForgotPassword = async (req, res) => {
 
     await faculty.save();
 
+    const escapedName = escapeHtml(faculty.name);
+
     await sendMail({
       to: faculty.email,
       subject: 'Faculty Password Reset OTP',
       html: `
-        <p>Hello ${faculty.name},</p>
+        <p>Hello ${escapedName},</p>
         <p>Your password reset OTP is:</p>
         <h2>${otp}</h2>
         <p>This OTP expires in 10 minutes.</p>
@@ -526,6 +708,20 @@ exports.facultyResetPassword = async (req, res) => {
       });
     }
 
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ message: 'Invalid email format' });
+    }
+
+    if (!isValidOTP(otp)) {
+      return res.status(400).json({ message: 'Invalid OTP format' });
+    }
+
+    if (!isValidPassword(newPassword)) {
+      return res.status(400).json({
+        message: 'Password must be 8-128 characters with at least one uppercase, one lowercase, and one number'
+      });
+    }
+
     const faculty = await Faculty.findOne({ email }).select(
       '+reset_otp +reset_otp_expiry +password'
     );
@@ -537,7 +733,7 @@ exports.facultyResetPassword = async (req, res) => {
     }
 
     if (
-      faculty.reset_otp !== otp ||
+      !timingSafeEqual(faculty.reset_otp, otp) ||
       Date.now() > faculty.reset_otp_expiry
     ) {
       return res.status(400).json({
@@ -545,7 +741,7 @@ exports.facultyResetPassword = async (req, res) => {
       });
     }
 
-    faculty.password = await bcrypt.hash(newPassword, 10);
+    faculty.password = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
     faculty.reset_otp = undefined;
     faculty.reset_otp_expiry = undefined;
 
@@ -581,6 +777,12 @@ exports.staffForgotPassword = async (req, res) => {
       });
     }
 
+    if (!isValidEmail(email)) {
+      return res.status(400).json({
+        error: 'Invalid email format'
+      });
+    }
+
     const staff = await Staff.findOne({ email });
 
     if (!staff) {
@@ -596,11 +798,13 @@ exports.staffForgotPassword = async (req, res) => {
 
     await staff.save();
 
+    const escapedName = escapeHtml(staff.name);
+
     await sendMail({
       to: staff.email,
       subject: 'Password Reset OTP',
       html: `
-        <p>Hello ${staff.name},</p>
+        <p>Hello ${escapedName},</p>
         <p>Your password reset OTP is:</p>
         <h2>${otp}</h2>
         <p>This OTP expires in 10 minutes.</p>
@@ -634,6 +838,20 @@ exports.staffResetPassword = async (req, res) => {
       });
     }
 
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ error: 'Invalid email format' });
+    }
+
+    if (!isValidOTP(otp)) {
+      return res.status(400).json({ error: 'Invalid OTP format' });
+    }
+
+    if (!isValidPassword(newPassword)) {
+      return res.status(400).json({
+        error: 'Password must be 8-128 characters with at least one uppercase, one lowercase, and one number'
+      });
+    }
+
     const staff = await Staff.findOne({ email }).select(
       '+reset_otp +reset_otp_expiry'
     );
@@ -643,7 +861,7 @@ exports.staffResetPassword = async (req, res) => {
     }
 
     if (
-      staff.reset_otp !== otp ||
+      !timingSafeEqual(staff.reset_otp, otp) ||
       Date.now() > staff.reset_otp_expiry
     ) {
       return res.status(400).json({
@@ -651,7 +869,7 @@ exports.staffResetPassword = async (req, res) => {
       });
     }
 
-    staff.password = await bcrypt.hash(newPassword, 10);
+    staff.password = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
     staff.reset_otp = undefined;
     staff.reset_otp_expiry = undefined;
 
@@ -676,6 +894,20 @@ exports.staffChangePassword = async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body;
 
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ error: 'Both current and new password are required' });
+    }
+
+    if (typeof currentPassword !== 'string' || currentPassword.length > 128) {
+      return res.status(400).json({ error: 'Invalid current password format' });
+    }
+
+    if (!isValidPassword(newPassword)) {
+      return res.status(400).json({
+        error: 'New password must be 8-128 characters with at least one uppercase, one lowercase, and one number'
+      });
+    }
+
     const staff = await Staff.findById(req.user.id).select('+password');
 
     if (!staff) {
@@ -690,7 +922,7 @@ exports.staffChangePassword = async (req, res) => {
       });
     }
 
-    staff.password = await bcrypt.hash(newPassword, 10);
+    staff.password = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
     await staff.save();
 
     return res.json({
@@ -715,6 +947,12 @@ exports.staffRequestEmailChangeOTP = async (req, res) => {
     if (!newEmail) {
       return res.status(400).json({
         error: 'New email is required'
+      });
+    }
+
+    if (!isValidEmail(newEmail)) {
+      return res.status(400).json({
+        error: 'Invalid email format'
       });
     }
 
@@ -769,6 +1007,18 @@ exports.staffConfirmEmailChange = async (req, res) => {
   try {
     const { newEmail, otp } = req.body;
 
+    if (!newEmail || !otp) {
+      return res.status(400).json({ error: 'Email and OTP are required' });
+    }
+
+    if (!isValidEmail(newEmail)) {
+      return res.status(400).json({ error: 'Invalid email format' });
+    }
+
+    if (!isValidOTP(otp)) {
+      return res.status(400).json({ error: 'Invalid OTP format' });
+    }
+
     const staff = await Staff.findById(req.user.id).select(
       '+email_otp +email_otp_expiry +pending_email'
     );
@@ -779,7 +1029,7 @@ exports.staffConfirmEmailChange = async (req, res) => {
 
     if (
       staff.pending_email !== newEmail ||
-      staff.email_otp !== otp ||
+      !timingSafeEqual(staff.email_otp, otp) ||
       Date.now() > staff.email_otp_expiry
     ) {
       return res.status(400).json({

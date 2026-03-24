@@ -1,8 +1,7 @@
 const express = require('express');
 const router = express.Router({ mergeParams: true });
 
-const auth = require('../../middlewares/auth.middleware');
-const role = require('../../middlewares/role.middleware');
+const { validatePaginationParams } = require('../../middlewares/paramValidator.middleware');
 
 const {
   getDamagedAssetHistory
@@ -10,11 +9,10 @@ const {
 
 /* =====================================================
    SUPER ADMIN – DAMAGED ASSET HISTORY
+   Auth applied at index.js level
 ===================================================== */
 
-router.use(auth, role('super_admin'));
-
 /* Get damaged asset logs */
-router.get('/', getDamagedAssetHistory);
+router.get('/', validatePaginationParams, getDamagedAssetHistory);
 
 module.exports = router;

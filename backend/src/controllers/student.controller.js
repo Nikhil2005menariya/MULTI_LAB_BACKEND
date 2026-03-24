@@ -10,6 +10,56 @@ const ComponentRequest = require('../models/ComponentRequest');
 const { sendMail } = require('../services/mail.service');
 
 /* ============================
+   INPUT VALIDATION & SANITIZATION
+============================ */
+
+const EMAIL_REGEX = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
+const PASSWORD_MIN_LENGTH = 8;
+
+const isValidEmail = (email) => {
+  if (!email || typeof email !== 'string') return false;
+  return EMAIL_REGEX.test(email) && email.length <= 254;
+};
+
+const isValidObjectId = (id) => {
+  return mongoose.Types.ObjectId.isValid(id);
+};
+
+const isValidPositiveInteger = (num) => {
+  const parsed = Number(num);
+  return !isNaN(parsed) && parsed > 0 && Number.isInteger(parsed);
+};
+
+const isValidPassword = (password) => {
+  if (!password || typeof password !== 'string') return false;
+  if (password.length < PASSWORD_MIN_LENGTH || password.length > 128) return false;
+  const hasUpperCase = /[A-Z]/.test(password);
+  const hasLowerCase = /[a-z]/.test(password);
+  const hasNumber = /[0-9]/.test(password);
+  return hasUpperCase && hasLowerCase && hasNumber;
+};
+
+const escapeRegex = (str) => {
+  if (!str || typeof str !== 'string') return '';
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+};
+
+const sanitizeText = (text, maxLength = 1000) => {
+  if (!text || typeof text !== 'string') return '';
+  return text.replace(/<[^>]*>/g, '').trim().substring(0, maxLength);
+};
+
+const escapeHtml = (str) => {
+  if (!str || typeof str !== 'string') return '';
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+};
+
+/* ============================
    GET ALL ITEMS (STUDENT SAFE)
 ============================ */
 exports.getAllItems = async (req, res) => {
@@ -20,10 +70,11 @@ exports.getAllItems = async (req, res) => {
 
     const search = (req.query.search || '').trim();
 
-    // 🔥 Build search match
+    // Build search match with escaped regex to prevent ReDoS
     let searchMatch = {};
     if (search) {
-      const regex = new RegExp(`^${search}`, 'i'); // prefix match (fast)
+      const escapedSearch = escapeRegex(search);
+      const regex = new RegExp(`^${escapedSearch}`, 'i'); // prefix match (fast)
 
       searchMatch = {
         $or: [
@@ -157,6 +208,11 @@ exports.getItemLabs = async (req, res) => {
   try {
     const { item_id } = req.params;
 
+    // Validate ObjectId
+    if (!item_id || !isValidObjectId(item_id)) {
+      return res.status(400).json({ error: 'Invalid item ID format' });
+    }
+
     const inventories = await LabInventory.aggregate([
 
       {
@@ -226,8 +282,9 @@ exports.getItemLabs = async (req, res) => {
     });
 
   } catch (err) {
+    console.error('Get item labs error:', err);
     return res.status(500).json({
-      error: err.message
+      error: 'Failed to fetch item labs'
     });
   }
 };
@@ -261,6 +318,15 @@ exports.raiseTransaction = async (req, res) => {
       });
     }
 
+    // Validate email format
+    if (!isValidEmail(faculty_email)) {
+      return res.status(400).json({ error: 'Invalid faculty email format' });
+    }
+
+    // Sanitize inputs
+    const sanitizedProjectName = sanitizeText(project_name, 200);
+    const sanitizedFacultyId = sanitizeText(faculty_id, 50);
+
     const student = await Student.findById(req.user.id);
     if (!student || !student.is_active) {
       return res.status(404).json({ error: 'Student not found' });
@@ -285,7 +351,16 @@ exports.raiseTransaction = async (req, res) => {
 
       const { item_id, lab_id, quantity } = reqItem;
 
-      if (!quantity || quantity <= 0) {
+      // Validate ObjectIds
+      if (!item_id || !isValidObjectId(item_id)) {
+        throw new Error('Invalid item ID format');
+      }
+      if (!lab_id || !isValidObjectId(lab_id)) {
+        throw new Error('Invalid lab ID format');
+      }
+
+      // Validate quantity
+      if (!quantity || !isValidPositiveInteger(quantity)) {
         throw new Error('Invalid quantity');
       }
 
@@ -329,11 +404,11 @@ exports.raiseTransaction = async (req, res) => {
 
     const transaction = await Transaction.create([{
       transaction_id: transactionId,
-      project_name: project_name.trim(),
+      project_name: sanitizedProjectName,
       student_id: student._id,
       student_reg_no: student.reg_no,
       faculty_email,
-      faculty_id,
+      faculty_id: sanitizedFacultyId,
       expected_return_date,
       items: normalizedItems,
       status: 'raised',
@@ -353,17 +428,21 @@ exports.raiseTransaction = async (req, res) => {
     const approvalLink =
       `${process.env.FRONTEND_URL}/faculty/approve?token=${approvalToken}`;
 
+    // Escape user content for HTML email
+    const escapedStudentName = escapeHtml(student.name);
+    const escapedProjectName = escapeHtml(sanitizedProjectName);
+
     await sendMail({
       to: faculty_email,
       subject: `Approval Required – ${transactionId}`,
       html: `
         <h2>IoT Lab Borrow Request</h2>
-        <p><strong>Student:</strong> ${student.name} (${student.reg_no})</p>
-        <p><strong>Project:</strong> ${project_name}</p>
+        <p><strong>Student:</strong> ${escapedStudentName} (${escapeHtml(student.reg_no)})</p>
+        <p><strong>Project:</strong> ${escapedProjectName}</p>
         <p><strong>Transaction ID:</strong> ${transactionId}</p>
         <p><strong>Expected Return:</strong> ${new Date(expected_return_date).toDateString()}</p>
         <br/>
-        <a href="${approvalLink}" 
+        <a href="${approvalLink}"
            style="background:#2563eb;color:white;padding:10px 18px;
                   text-decoration:none;border-radius:6px;">
            Approve Request
@@ -384,8 +463,9 @@ exports.raiseTransaction = async (req, res) => {
     await session.abortTransaction();
     session.endSession();
 
+    console.error('Raise transaction error:', err);
     return res.status(400).json({
-      error: err.message
+      error: err.message || 'Failed to raise transaction'
     });
   }
 };
@@ -429,8 +509,16 @@ exports.getMyTransactions = async (req, res) => {
 ============================ */
 exports.getTransactionById = async (req, res) => {
   try {
+    const { transaction_id } = req.params;
+
+    // Validate and sanitize transaction_id
+    if (!transaction_id || !transaction_id.trim()) {
+      return res.status(400).json({ error: 'Transaction ID is required' });
+    }
+    const sanitizedTxnId = sanitizeText(transaction_id, 100);
+
     const transaction = await Transaction.findOne({
-      transaction_id: req.params.transaction_id,
+      transaction_id: sanitizedTxnId,
       student_id: req.user.id
     })
       .populate('items.item_id', 'name sku tracking_type')
@@ -458,6 +546,7 @@ exports.getTransactionById = async (req, res) => {
     });
 
   } catch (err) {
+    console.error('Get transaction error:', err);
     return res.status(500).json({
       error: 'Failed to fetch transaction'
     });
@@ -473,8 +562,14 @@ exports.extendReturnDate = async (req, res) => {
       return res.status(400).json({ error: 'New return date is required' });
     }
 
+    // Validate and sanitize transaction_id
+    if (!transaction_id || !transaction_id.trim()) {
+      return res.status(400).json({ error: 'Transaction ID is required' });
+    }
+    const sanitizedTxnId = sanitizeText(transaction_id, 100);
+
     const transaction = await Transaction.findOne({
-      transaction_id,
+      transaction_id: sanitizedTxnId,
       student_id: req.user.id
     });
 
@@ -564,6 +659,27 @@ exports.requestComponent = async (req, res) => {
       });
     }
 
+    // Validate lab_id ObjectId
+    if (!isValidObjectId(lab_id)) {
+      return res.status(400).json({ error: 'Invalid lab ID format' });
+    }
+
+    // Validate quantity
+    if (!isValidPositiveInteger(quantity_requested)) {
+      return res.status(400).json({ error: 'Invalid quantity requested' });
+    }
+
+    // Validate urgency
+    const validUrgencies = ['low', 'medium', 'high'];
+    if (urgency && !validUrgencies.includes(urgency)) {
+      return res.status(400).json({ error: 'Invalid urgency level' });
+    }
+
+    // Sanitize text inputs
+    const sanitizedComponentName = sanitizeText(component_name, 200);
+    const sanitizedCategory = sanitizeText(category, 100);
+    const sanitizedUseCase = sanitizeText(use_case, 1000);
+
     const student = await Student.findById(req.user.id);
     if (!student) {
       return res.status(404).json({
@@ -588,10 +704,10 @@ exports.requestComponent = async (req, res) => {
       student_id: student._id,
       student_reg_no: student.reg_no,
       student_email: student.email,
-      component_name,
-      category,
+      component_name: sanitizedComponentName,
+      category: sanitizedCategory,
       quantity_requested,
-      use_case,
+      use_case: sanitizedUseCase,
       urgency: urgency || 'medium',
       status: 'pending'
     });
@@ -606,6 +722,7 @@ exports.requestComponent = async (req, res) => {
     });
 
   } catch (err) {
+    console.error('Request component error:', err);
     return res.status(500).json({
       error: 'Failed to submit request'
     });
@@ -691,41 +808,42 @@ exports.getProfile = async (req, res) => {
 exports.changePassword = async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body;
- 
+
     if (!currentPassword || !newPassword) {
       return res.status(400).json({
         error: 'Current password and new password are required',
       });
     }
- 
-    if (newPassword.length < 6) {
+
+    // Validate password strength
+    if (!isValidPassword(newPassword)) {
       return res.status(400).json({
-        error: 'New password must be at least 6 characters',
+        error: 'Password must be 8-128 characters with at least one uppercase, one lowercase, and one number',
       });
     }
- 
+
     if (currentPassword === newPassword) {
       return res.status(400).json({
         error: 'New password must be different from current password',
       });
     }
- 
+
     // Explicitly select password (select: false in schema)
     const student = await Student.findById(req.user.id).select('+password');
- 
+
     if (!student) {
       return res.status(404).json({ error: 'Student not found' });
     }
- 
+
     const isMatch = await bcrypt.compare(currentPassword, student.password);
     if (!isMatch) {
       return res.status(401).json({ error: 'Current password is incorrect' });
     }
- 
-    const hashed = await bcrypt.hash(newPassword, 10);
+
+    const hashed = await bcrypt.hash(newPassword, 12);
     student.password = hashed;
     await student.save();
- 
+
     return res.json({
       success: true,
       message: 'Password updated successfully',

@@ -16,6 +16,82 @@ const { PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
 const s3 = require('../utils/s3');
 
 /* ============================
+   INPUT VALIDATION & SANITIZATION UTILITIES
+============================ */
+
+// Email validation (RFC 5322 simplified)
+const isValidEmail = (email) => {
+  if (!email || typeof email !== 'string') return false;
+  const emailRegex = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
+  return emailRegex.test(email) && email.length <= 254;
+};
+
+// Name validation - only letters, numbers, spaces, hyphens, and common punctuation
+const isValidName = (name) => {
+  if (!name || typeof name !== 'string') return false;
+  // Allow letters (any language), numbers, spaces, hyphens, apostrophes, periods
+  const nameRegex = /^[\p{L}\p{N}\s\-'.]+$/u;
+  return nameRegex.test(name.trim()) && name.trim().length >= 1 && name.trim().length <= 200;
+};
+
+// Alphanumeric with basic allowed characters
+const isValidAlphanumeric = (str, allowSpaces = false, allowHyphens = false) => {
+  if (!str || typeof str !== 'string') return false;
+  let pattern = '^[a-zA-Z0-9';
+  if (allowSpaces) pattern += '\\s';
+  if (allowHyphens) pattern += '\\-';
+  pattern += ']+$';
+  return new RegExp(pattern).test(str);
+};
+
+// Text field validation (description, category, etc.) - prevent XSS
+const sanitizeText = (text, maxLength = 1000) => {
+  if (!text || typeof text !== 'string') return '';
+  // Remove any HTML tags and limit length
+  return text.replace(/<[^>]*>/g, '').trim().substring(0, maxLength);
+};
+
+// Escape special regex characters to prevent ReDoS
+const escapeRegex = (str) => {
+  if (!str || typeof str !== 'string') return '';
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+};
+
+// Validate MongoDB ObjectId
+const isValidObjectId = (id) => {
+  return mongoose.Types.ObjectId.isValid(id);
+};
+
+// Validate positive integer
+const isValidPositiveInteger = (num) => {
+  const parsed = Number(num);
+  return !isNaN(parsed) && parsed > 0 && Number.isInteger(parsed);
+};
+
+// Validate non-negative integer
+const isValidNonNegativeInteger = (num) => {
+  const parsed = Number(num);
+  return !isNaN(parsed) && parsed >= 0 && Number.isInteger(parsed);
+};
+
+// Sanitize filename
+const sanitizeFilename = (filename) => {
+  if (!filename || typeof filename !== 'string') return 'file';
+  // Remove path traversal attempts and special characters
+  return filename
+    .replace(/\.\./g, '')
+    .replace(/[^a-zA-Z0-9._-]/g, '_')
+    .substring(0, 255);
+};
+
+// Validate date string
+const isValidDateString = (dateStr) => {
+  if (!dateStr) return false;
+  const date = new Date(dateStr);
+  return date instanceof Date && !isNaN(date.getTime());
+};
+
+/* ============================
    SHARED HELPER — asset merge stage
    Replaces raw asset_ids ObjectIds with full objects { _id, asset_tag, serial_no, status }
    AND keeps asset_tags as flat string array for convenience
@@ -172,26 +248,77 @@ exports.addItem = async (req, res) => {
       invoice_number, is_student_visible = true
     } = req.body;
 
-    if (!labId) return res.status(403).json({ error: 'Lab access denied' });
-    if (!vendor) return res.status(400).json({ error: 'Vendor is required' });
-
-    if (!/^[a-zA-Z0-9\s-]+$/.test(name)) {
-      return res.status(400).json({ error: 'Name can only contain letters, numbers, spaces or hyphens' });
+    // Validate labId
+    if (!labId || !isValidObjectId(labId)) {
+      return res.status(403).json({ error: 'Lab access denied' });
     }
 
+    // Validate required fields
+    if (!name || !sku || !vendor) {
+      return res.status(400).json({ error: 'Name, SKU, and vendor are required' });
+    }
+
+    // Validate name
+    if (!isValidAlphanumeric(name, true, true)) {
+      return res.status(400).json({ error: 'Name can only contain letters, numbers, spaces, and hyphens' });
+    }
+    if (name.trim().length < 2 || name.trim().length > 100) {
+      return res.status(400).json({ error: 'Name must be between 2 and 100 characters' });
+    }
     name = name.toLowerCase().replace(/[\s-]+/g, '_').trim();
 
-    if (!/^[a-zA-Z0-9]+$/.test(sku)) {
+    // Validate SKU
+    if (!isValidAlphanumeric(sku, false, false)) {
       return res.status(400).json({ error: 'SKU must contain only letters and numbers' });
     }
-
+    if (sku.trim().length < 2 || sku.trim().length > 50) {
+      return res.status(400).json({ error: 'SKU must be between 2 and 50 characters' });
+    }
     sku = sku.toUpperCase().trim();
+
+    // Validate vendor name
+    if (!isValidName(vendor)) {
+      return res.status(400).json({ error: 'Invalid vendor name format' });
+    }
+    vendor = sanitizeText(vendor, 200);
+
+    // Validate category
+    if (category) {
+      category = sanitizeText(category, 100);
+    }
+
+    // Validate description
+    if (description) {
+      description = sanitizeText(description, 1000);
+    }
+
+    // Validate invoice number
+    if (invoice_number) {
+      if (!isValidAlphanumeric(invoice_number, false, true)) {
+        return res.status(400).json({ error: 'Invoice number can only contain letters, numbers, and hyphens' });
+      }
+      invoice_number = invoice_number.trim().substring(0, 50);
+    }
+
+    // Validate quantities
+    if (!isValidPositiveInteger(initial_quantity)) {
+      return res.status(400).json({ error: 'Initial quantity must be a positive integer' });
+    }
+    if (!isValidNonNegativeInteger(reserved_quantity)) {
+      return res.status(400).json({ error: 'Reserved quantity must be a non-negative integer' });
+    }
 
     const qty = Number(initial_quantity);
     const reservedQty = Number(reserved_quantity);
 
-    if (!qty || qty <= 0) return res.status(400).json({ error: 'Initial quantity must be greater than 0' });
-    if (reservedQty < 0 || reservedQty > qty) return res.status(400).json({ error: 'Reserved quantity must be between 0 and initial quantity' });
+    if (reservedQty > qty) {
+      return res.status(400).json({ error: 'Reserved quantity cannot exceed initial quantity' });
+    }
+
+    // Validate tracking type
+    if (tracking_type && !['asset', 'bulk'].includes(tracking_type)) {
+      return res.status(400).json({ error: 'Invalid tracking type' });
+    }
 
     let item = await Item.findOne({ sku });
 
@@ -264,18 +391,36 @@ exports.addItem = async (req, res) => {
 exports.updateItem = async (req, res) => {
   try {
     const labId = req.user.lab_id;
-    if (!labId) return res.status(403).json({ error: 'Lab access denied' });
+
+    // Validate labId and item ID
+    if (!labId || !isValidObjectId(labId)) {
+      return res.status(403).json({ error: 'Lab access denied' });
+    }
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid item ID' });
+    }
 
     const item = await Item.findById(req.params.id);
     if (!item) return res.status(404).json({ error: 'Item not found' });
 
-    if (req.body.tracking_type && req.body.tracking_type !== item.tracking_type) {
-      return res.status(400).json({ error: 'Tracking type cannot be changed after item creation' });
+    // Validate tracking type if provided
+    if (req.body.tracking_type) {
+      if (req.body.tracking_type !== item.tracking_type) {
+        return res.status(400).json({ error: 'Tracking type cannot be changed after item creation' });
+      }
     }
 
-    const addQty = Number(req.body.add_quantity || 0);
+    // Validate quantities
+    const addQty = req.body.add_quantity !== undefined ? Number(req.body.add_quantity) : 0;
+    if (isNaN(addQty)) {
+      return res.status(400).json({ error: 'Invalid add_quantity value' });
+    }
+
     const newReserved = req.body.reserved_quantity !== undefined
       ? Number(req.body.reserved_quantity) : undefined;
+    if (newReserved !== undefined && (isNaN(newReserved) || newReserved < 0)) {
+      return res.status(400).json({ error: 'Invalid reserved_quantity value' });
+    }
 
     const createdAssets = [];
 
@@ -289,7 +434,23 @@ exports.updateItem = async (req, res) => {
       }
 
       if (item.tracking_type === 'asset') {
-        if (!req.body.vendor) return res.status(400).json({ error: 'Vendor is required when adding new stock' });
+        // Validate vendor for asset tracking
+        if (!req.body.vendor) {
+          return res.status(400).json({ error: 'Vendor is required when adding new stock' });
+        }
+        if (!isValidName(req.body.vendor)) {
+          return res.status(400).json({ error: 'Invalid vendor name format' });
+        }
+
+        const vendor = sanitizeText(req.body.vendor, 200);
+        let invoice_number = '';
+
+        if (req.body.invoice_number) {
+          if (!isValidAlphanumeric(req.body.invoice_number, false, true)) {
+            return res.status(400).json({ error: 'Invoice number can only contain letters, numbers, and hyphens' });
+          }
+          invoice_number = req.body.invoice_number.trim().substring(0, 50);
+        }
 
         const lab = await Lab.findById(labId).lean();
         const lastAsset = await ItemAsset.findOne({ item_id: item._id, lab_id: labId })
@@ -305,7 +466,7 @@ exports.updateItem = async (req, res) => {
           const assetTag = `${lab.code}-${item.sku}-${String(lastSeq + i).padStart(4, '0')}`;
           const asset = await ItemAsset.create({
             lab_id: labId, item_id: item._id, asset_tag: assetTag,
-            vendor: req.body.vendor, invoice_number: req.body.invoice_number,
+            vendor, invoice_number,
             status: 'available', condition: 'good'
           });
           createdAssets.push(asset.asset_tag);
@@ -367,7 +528,14 @@ exports.updateItem = async (req, res) => {
 exports.getItemAssets = async (req, res) => {
   try {
     const labId = req.user.lab_id;
-    if (!labId) return res.status(403).json({ error: 'Lab access denied' });
+    if (!labId || !isValidObjectId(labId)) {
+      return res.status(403).json({ error: 'Lab access denied' });
+    }
+
+    // Validate item ID
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid item ID' });
+    }
 
     const { id } = req.params;
     const { status } = req.query;
@@ -397,7 +565,14 @@ exports.getItemAssets = async (req, res) => {
 exports.removeItem = async (req, res) => {
   try {
     const labId = req.user.lab_id;
-    if (!labId) return res.status(403).json({ error: 'Lab access denied' });
+    if (!labId || !isValidObjectId(labId)) {
+      return res.status(403).json({ error: 'Lab access denied' });
+    }
+
+    // Validate item ID
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid item ID' });
+    }
 
     const item = await Item.findById(req.params.id);
     if (!item) return res.status(404).json({ error: 'Item not found' });
@@ -442,16 +617,22 @@ exports.removeItem = async (req, res) => {
 exports.getAllItems = async (req, res) => {
   try {
     const labId = req.user.lab_id;
-    if (!labId) return res.status(403).json({ error: 'Lab access denied' });
+    if (!labId || !isValidObjectId(labId)) {
+      return res.status(403).json({ error: 'Lab access denied' });
+    }
 
+    // Validate and sanitize pagination
     const page = Math.max(parseInt(req.query.page) || 1, 1);
-    const limit = Math.min(parseInt(req.query.limit) || 25, 100);
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 25, 1), 100);
     const skip = (page - 1) * limit;
+
+    // Sanitize search input
     const search = req.query.search?.trim();
 
     let itemMatch = { is_active: true };
     if (search) {
-      const regex = new RegExp(search, 'i');
+      const sanitizedSearch = escapeRegex(sanitizeText(search, 100));
+      const regex = new RegExp(sanitizedSearch, 'i');
       itemMatch.$or = [{ name: regex }, { sku: regex }, { category: regex }];
     }
 
@@ -495,10 +676,18 @@ exports.getAllItems = async (req, res) => {
 exports.searchItemsByPrefix = async (req, res) => {
   try {
     let { q } = req.query;
-    if (!q || q.length < 2) return res.json({ success: true, count: 0, data: [] });
+    if (!q || q.length < 2) {
+      return res.json({ success: true, count: 0, data: [] });
+    }
 
-    const normalizedName = q.toLowerCase().replace(/[\s-]+/g, '_').trim();
-    const normalizedSku = q.toUpperCase().trim();
+    // Sanitize and limit input length
+    q = sanitizeText(q, 50);
+    if (q.length < 2) {
+      return res.json({ success: true, count: 0, data: [] });
+    }
+
+    const normalizedName = escapeRegex(q.toLowerCase().replace(/[\s-]+/g, '_').trim());
+    const normalizedSku = escapeRegex(q.toUpperCase().trim());
 
     const items = await Item.find({
       $or: [
@@ -614,7 +803,9 @@ exports.getTransactionHistory = async (req, res) => {
 exports.searchTransactions = async (req, res) => {
   try {
     const labId = req.user.lab_id;
-    if (!labId) return res.status(403).json({ error: 'Lab access denied' });
+    if (!labId || !isValidObjectId(labId)) {
+      return res.status(403).json({ error: 'Lab access denied' });
+    }
 
     const labObjectId = new mongoose.Types.ObjectId(String(labId));
 
@@ -623,14 +814,23 @@ exports.searchTransactions = async (req, res) => {
       status, item_name, asset_tag, page = 1, limit = 25
     } = req.query;
 
-    const pageNum  = Math.max(parseInt(page),  1);
-    const limitNum = Math.min(parseInt(limit), 100);
+    // Validate email if provided
+    if (faculty_email && !isValidEmail(faculty_email)) {
+      return res.status(400).json({ error: 'Invalid email format' });
+    }
+
+    // Validate and sanitize pagination
+    const pageNum  = Math.max(parseInt(page) || 1, 1);
+    const limitNum = Math.min(Math.max(parseInt(limit) || 25, 1), 100);
     const skip     = (pageNum - 1) * limitNum;
 
     // Pre-resolve item_name → item _ids
     let itemIdFilter = null;
     if (item_name) {
-      const matchedItems = await Item.find({ name: new RegExp(item_name, 'i') }).select('_id').lean();
+      const sanitizedItemName = escapeRegex(sanitizeText(item_name, 100));
+      const matchedItems = await Item.find({
+        name: new RegExp(sanitizedItemName, 'i')
+      }).select('_id').lean();
       if (matchedItems.length === 0) {
         return res.json({ success: true, page: pageNum, limit: limitNum, totalItems: 0, totalPages: 0, count: 0, data: [] });
       }
@@ -640,9 +840,10 @@ exports.searchTransactions = async (req, res) => {
     // Pre-resolve asset_tag → asset _ids
     let assetIdFilter = null;
     if (asset_tag) {
+      const sanitizedAssetTag = escapeRegex(sanitizeText(asset_tag, 50));
       const matchedAssets = await ItemAsset.find({
         lab_id: labObjectId,
-        asset_tag: new RegExp(asset_tag, 'i')
+        asset_tag: new RegExp(sanitizedAssetTag, 'i')
       }).select('_id').lean();
       if (matchedAssets.length === 0) {
         return res.json({ success: true, page: pageNum, limit: limitNum, totalItems: 0, totalPages: 0, count: 0, data: [] });
@@ -653,12 +854,30 @@ exports.searchTransactions = async (req, res) => {
     /* ── Build match stage ── */
     const matchStage = { 'items.lab_id': labObjectId };
 
-    // ✅ Prefix regex on all text fields — no more exact match
-    if (transaction_id) matchStage.transaction_id = new RegExp(`^${transaction_id.trim()}`, 'i');
-    if (reg_no)         matchStage.student_reg_no  = new RegExp(reg_no.trim(),        'i');
-    if (faculty_email)  matchStage.faculty_email   = new RegExp(faculty_email.trim(), 'i');
-    if (faculty_id)     matchStage.faculty_id      = new RegExp(faculty_id.trim(),    'i');
-    if (status)         matchStage.status          = status; // exact — dropdown value
+    // ✅ Sanitize and escape regex inputs to prevent ReDoS
+    if (transaction_id) {
+      const sanitized = escapeRegex(sanitizeText(transaction_id.trim(), 50));
+      matchStage.transaction_id = new RegExp(`^${sanitized}`, 'i');
+    }
+    if (reg_no) {
+      const sanitized = escapeRegex(sanitizeText(reg_no.trim(), 50));
+      matchStage.student_reg_no = new RegExp(sanitized, 'i');
+    }
+    if (faculty_email) {
+      const sanitized = escapeRegex(faculty_email.trim());
+      matchStage.faculty_email = new RegExp(sanitized, 'i');
+    }
+    if (faculty_id) {
+      const sanitized = escapeRegex(sanitizeText(faculty_id.trim(), 50));
+      matchStage.faculty_id = new RegExp(sanitized, 'i');
+    }
+    if (status) {
+      // Validate status is one of expected values
+      const validStatuses = ['raised', 'active', 'overdue', 'completed', 'cancelled', 'return_requested'];
+      if (validStatuses.includes(status)) {
+        matchStage.status = status;
+      }
+    }
 
     /* ── Item filter conditions ── */
     const itemFilterConditions = [{ $eq: ['$$item.lab_id', labObjectId] }];
@@ -897,7 +1116,14 @@ exports.getOverdueTransactions = async (req, res) => {
 exports.getItemById = async (req, res) => {
   try {
     const labId = req.user.lab_id;
-    if (!labId) return res.status(403).json({ error: 'Lab access denied' });
+    if (!labId || !isValidObjectId(labId)) {
+      return res.status(403).json({ error: 'Lab access denied' });
+    }
+
+    // Validate item ID
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid item ID' });
+    }
 
     const item = await Item.findOne({ _id: req.params.id, is_active: true }).lean();
     if (!item) return res.status(404).json({ error: 'Item not found' });
@@ -965,22 +1191,47 @@ exports.getLabSessions = async (req, res) => {
 exports.searchLabSessions = async (req, res) => {
   try {
     const labId = req.user.lab_id;
-    if (!labId) return res.status(403).json({ success: false, message: 'Lab access denied' });
+    if (!labId || !isValidObjectId(labId)) {
+      return res.status(403).json({ success: false, message: 'Lab access denied' });
+    }
 
     const { search, faculty_email, faculty_id, status, page = 1, limit = 25 } = req.query;
-    const pageNum = Math.max(parseInt(page), 1);
-    const limitNum = Math.min(parseInt(limit), 100);
+
+    // Validate email if provided
+    if (faculty_email && !isValidEmail(faculty_email)) {
+      return res.status(400).json({ error: 'Invalid email format' });
+    }
+
+    // Validate pagination
+    const pageNum = Math.max(parseInt(page) || 1, 1);
+    const limitNum = Math.min(Math.max(parseInt(limit) || 25, 1), 100);
     const skip = (pageNum - 1) * limitNum;
 
     const filter = { transaction_type: 'lab_session', 'items.lab_id': labId };
 
     if (search) {
-      const regex = new RegExp(search, 'i');
-      filter.$or = [{ transaction_id: regex }, { lab_slot: regex }, { faculty_email: regex }, { faculty_id: regex }];
+      const sanitizedSearch = escapeRegex(sanitizeText(search, 100));
+      const regex = new RegExp(sanitizedSearch, 'i');
+      filter.$or = [
+        { transaction_id: regex },
+        { lab_slot: regex },
+        { faculty_email: regex },
+        { faculty_id: regex }
+      ];
     }
-    if (faculty_email) filter.faculty_email = faculty_email;
-    if (faculty_id)    filter.faculty_id = faculty_id;
-    if (status)        filter.status = status;
+    if (faculty_email) {
+      filter.faculty_email = escapeRegex(faculty_email.trim());
+    }
+    if (faculty_id) {
+      filter.faculty_id = escapeRegex(sanitizeText(faculty_id, 50));
+    }
+    if (status) {
+      // Validate status is expected value
+      const validStatuses = ['raised', 'active', 'overdue', 'completed', 'cancelled'];
+      if (validStatuses.includes(status)) {
+        filter.status = status;
+      }
+    }
 
     const [totalItems, records] = await Promise.all([
       Transaction.countDocuments(filter),
@@ -1008,7 +1259,14 @@ exports.searchLabSessions = async (req, res) => {
 exports.getLabSessionDetail = async (req, res) => {
   try {
     const labId = req.user.lab_id;
-    if (!labId) return res.status(403).json({ success: false, message: 'Lab access denied' });
+    if (!labId || !isValidObjectId(labId)) {
+      return res.status(403).json({ success: false, message: 'Lab access denied' });
+    }
+
+    // Validate ID parameter
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: 'Invalid session ID' });
+    }
 
     const record = await Transaction.findOne({
       _id: req.params.id, transaction_type: 'lab_session', 'items.lab_id': labId
@@ -1083,11 +1341,15 @@ exports.getLabTransfers = async (req, res) => {
 exports.searchLabTransfers = async (req, res) => {
   try {
     const labId = req.user.lab_id;
-    if (!labId) return res.status(403).json({ success: false, message: 'Lab access denied' });
+    if (!labId || !isValidObjectId(labId)) {
+      return res.status(403).json({ success: false, message: 'Lab access denied' });
+    }
 
     const { search, transfer_type, status, faculty_name, page = 1, limit = 25 } = req.query;
-    const pageNum = Math.max(parseInt(page), 1);
-    const limitNum = Math.min(parseInt(limit), 100);
+
+    // Validate pagination
+    const pageNum = Math.max(parseInt(page) || 1, 1);
+    const limitNum = Math.min(Math.max(parseInt(limit) || 25, 1), 100);
     const skip = (pageNum - 1) * limitNum;
 
     const filter = {
@@ -1096,12 +1358,41 @@ exports.searchLabTransfers = async (req, res) => {
     };
 
     if (search) {
-      const regex = new RegExp(search, 'i');
-      filter.$and = [{ $or: [{ transaction_id: regex }, { target_lab_name_snapshot: regex }, { handover_faculty_name: regex }, { faculty_email: regex }] }];
+      const sanitizedSearch = escapeRegex(sanitizeText(search, 100));
+      const regex = new RegExp(sanitizedSearch, 'i');
+      filter.$and = [{
+        $or: [
+          { transaction_id: regex },
+          { target_lab_name_snapshot: regex },
+          { handover_faculty_name: regex },
+          { faculty_email: regex }
+        ]
+      }];
     }
-    if (transfer_type)  filter.transfer_type = transfer_type;
-    if (status)         filter.status = status;
-    if (faculty_name)   filter.handover_faculty_name = new RegExp(faculty_name, 'i');
+
+    // Validate transfer_type
+    if (transfer_type) {
+      const validTypes = ['temporary', 'permanent'];
+      if (validTypes.includes(transfer_type)) {
+        filter.transfer_type = transfer_type;
+      }
+    }
+
+    // Validate status
+    if (status) {
+      const validStatuses = ['raised', 'active', 'overdue', 'completed', 'cancelled', 'return_requested'];
+      if (validStatuses.includes(status)) {
+        filter.status = status;
+      }
+    }
+
+    // Sanitize faculty_name
+    if (faculty_name) {
+      if (isValidName(faculty_name)) {
+        const sanitized = escapeRegex(sanitizeText(faculty_name, 100));
+        filter.handover_faculty_name = new RegExp(sanitized, 'i');
+      }
+    }
 
     const [totalItems, records] = await Promise.all([
       Transaction.countDocuments(filter),
@@ -1131,7 +1422,14 @@ exports.searchLabTransfers = async (req, res) => {
 exports.getLabTransferDetail = async (req, res) => {
   try {
     const labId = req.user.lab_id;
-    if (!labId) return res.status(403).json({ success: false, message: 'Lab access denied' });
+    if (!labId || !isValidObjectId(labId)) {
+      return res.status(403).json({ success: false, message: 'Lab access denied' });
+    }
+
+    // Validate ID parameter
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: 'Invalid transfer ID' });
+    }
 
     const record = await Transaction.findOne({
       _id: req.params.id, transaction_type: 'lab_transfer',
@@ -1172,23 +1470,43 @@ exports.getLabTransferDetail = async (req, res) => {
 exports.getAllComponentRequests = async (req, res) => {
   try {
     const labId = req.user.lab_id;
-    if (!labId) return res.status(403).json({ success: false, message: 'Lab access denied' });
+    if (!labId || !isValidObjectId(labId)) {
+      return res.status(403).json({ success: false, message: 'Lab access denied' });
+    }
 
     const { search, status, urgency, category } = req.query;
+
+    // Validate pagination
     const page  = Math.max(parseInt(req.query.page)  || 1,  1);
-    const limit = Math.min(parseInt(req.query.limit) || 25, 100);
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 25, 1), 100);
     const skip  = (page - 1) * limit;
 
     const filter = { lab_id: labId };
 
-    /* Exact filters */
-    if (status)   filter.status   = status;
-    if (urgency)  filter.urgency  = urgency;
-    if (category) filter.category = new RegExp(category, 'i');
+    /* Exact filters with validation */
+    if (status) {
+      const validStatuses = ['pending', 'in_progress', 'approved', 'rejected', 'completed'];
+      if (validStatuses.includes(status)) {
+        filter.status = status;
+      }
+    }
+
+    if (urgency) {
+      const validUrgency = ['low', 'medium', 'high', 'urgent'];
+      if (validUrgency.includes(urgency)) {
+        filter.urgency = urgency;
+      }
+    }
+
+    if (category) {
+      const sanitizedCategory = escapeRegex(sanitizeText(category, 100));
+      filter.category = new RegExp(sanitizedCategory, 'i');
+    }
 
     /* Unified search — prefix match across component name, category, student reg no */
     if (search && search.trim()) {
-      const regex = new RegExp(search.trim(), 'i');
+      const sanitizedSearch = escapeRegex(sanitizeText(search.trim(), 100));
+      const regex = new RegExp(sanitizedSearch, 'i');
       filter.$or = [
         { component_name:   regex },
         { category:         regex },
@@ -1224,7 +1542,14 @@ exports.getAllComponentRequests = async (req, res) => {
 exports.getComponentRequestById = async (req, res) => {
   try {
     const labId = req.user.lab_id;
-    if (!labId) return res.status(403).json({ success: false, message: 'Lab access denied' });
+    if (!labId || !isValidObjectId(labId)) {
+      return res.status(403).json({ success: false, message: 'Lab access denied' });
+    }
+
+    // Validate ID parameter
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: 'Invalid request ID' });
+    }
 
     const request = await ComponentRequest.findOne({ _id: req.params.id, lab_id: labId })
       .populate('student_id', 'name reg_no email').lean();
@@ -1242,9 +1567,25 @@ exports.getComponentRequestById = async (req, res) => {
 exports.updateComponentRequestStatus = async (req, res) => {
   try {
     const labId = req.user.lab_id;
-    if (!labId) return res.status(403).json({ success: false, message: 'Lab access denied' });
+    if (!labId || !isValidObjectId(labId)) {
+      return res.status(403).json({ success: false, message: 'Lab access denied' });
+    }
+
+    // Validate ID parameter
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: 'Invalid request ID' });
+    }
 
     const { status, admin_remarks } = req.body;
+
+    // Validate status
+    const validStatuses = ['pending', 'in_progress', 'approved', 'rejected', 'completed'];
+    if (!status || !validStatuses.includes(status)) {
+      return res.status(400).json({ success: false, message: 'Invalid status value' });
+    }
+
+    // Sanitize admin_remarks if provided
+    const sanitizedRemarks = admin_remarks ? sanitizeText(admin_remarks, 1000) : null;
     if (!['approved', 'rejected', 'reviewed'].includes(status)) {
       return res.status(400).json({ success: false, message: 'Invalid status' });
     }
@@ -1257,7 +1598,7 @@ exports.updateComponentRequestStatus = async (req, res) => {
     }
 
     request.status = status;
-    request.admin_remarks = admin_remarks || null;
+    request.admin_remarks = sanitizedRemarks;
     await request.save();
 
     return res.json({ success: true, message: `Request ${status} successfully`, data: request });
@@ -1276,20 +1617,60 @@ exports.uploadBill = async (req, res) => {
     const labId = req.user.lab_id;
     const { title, bill_type, bill_date, invoice_number } = req.body;
 
-    if (!labId) return res.status(403).json({ success: false, message: 'Lab access denied' });
+    // Validate labId
+    if (!labId || !isValidObjectId(labId)) {
+      return res.status(403).json({ success: false, message: 'Lab access denied' });
+    }
+
+    // Validate required fields
     if (!title || !bill_date || !invoice_number || !req.file) {
       return res.status(400).json({ success: false, message: 'Title, bill date, invoice number and PDF file are required' });
     }
 
-    const s3Key = `bills/${labId}/${Date.now()}-${req.file.originalname}`;
+    // Validate title
+    if (!isValidName(title)) {
+      return res.status(400).json({ success: false, message: 'Invalid title format' });
+    }
+    const sanitizedTitle = sanitizeText(title, 200);
+
+    // Validate bill_type
+    const validBillTypes = ['purchase', 'maintenance', 'service', 'other'];
+    if (bill_type && !validBillTypes.includes(bill_type)) {
+      return res.status(400).json({ success: false, message: 'Invalid bill type' });
+    }
+
+    // Validate invoice_number
+    if (!isValidAlphanumeric(invoice_number, false, true)) {
+      return res.status(400).json({ success: false, message: 'Invoice number can only contain letters, numbers, and hyphens' });
+    }
+    const sanitizedInvoice = invoice_number.trim().substring(0, 50);
+
+    // Validate date
+    if (!isValidDateString(bill_date)) {
+      return res.status(400).json({ success: false, message: 'Invalid bill date format' });
+    }
+
+    // Validate file
+    if (!req.file.originalname || req.file.size > 10 * 1024 * 1024) { // 10MB limit
+      return res.status(400).json({ success: false, message: 'File must be less than 10MB' });
+    }
+
+    // Sanitize filename for S3
+    const sanitizedFilename = sanitizeFilename(req.file.originalname);
+    const s3Key = `bills/${labId}/${Date.now()}-${sanitizedFilename}`;
+
     await s3.send(new PutObjectCommand({
       Bucket: process.env.AWS_S3_BUCKET, Key: s3Key,
       Body: req.file.buffer, ContentType: 'application/pdf'
     }));
 
     const bill = await Bill.create({
-      lab_id: labId, title, bill_type, invoice_number,
-      bill_date: new Date(bill_date), s3_key: s3Key,
+      lab_id: labId,
+      title: sanitizedTitle,
+      bill_type,
+      invoice_number: sanitizedInvoice,
+      bill_date: new Date(bill_date),
+      s3_key: s3Key,
       s3_url: `https://${process.env.AWS_S3_BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com/${s3Key}`,
       uploaded_by: req.user.id
     });
@@ -1305,26 +1686,60 @@ exports.uploadBill = async (req, res) => {
 exports.getBills = async (req, res) => {
   try {
     const labId = req.user.lab_id;
-    if (!labId) return res.status(403).json({ success: false, message: 'Lab access denied' });
+    if (!labId || !isValidObjectId(labId)) {
+      return res.status(403).json({ success: false, message: 'Lab access denied' });
+    }
 
     const { month, from, to, date, invoice_number, bill_type } = req.query;
+
+    // Validate pagination
     const page = Math.max(parseInt(req.query.page) || 1, 1);
-    const limit = Math.min(parseInt(req.query.limit) || 25, 100);
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 25, 1), 100);
     const skip = (page - 1) * limit;
 
     const filter = { lab_id: labId };
-    if (invoice_number) filter.invoice_number = invoice_number;
-    if (bill_type)      filter.bill_type = bill_type;
 
+    // Validate and sanitize invoice_number
+    if (invoice_number) {
+      const sanitized = escapeRegex(sanitizeText(invoice_number, 50));
+      filter.invoice_number = sanitized;
+    }
+
+    // Validate bill_type
+    if (bill_type) {
+      const validBillTypes = [
+        'electricity',
+        'internet',
+        'maintenance',
+        'equipment',
+        'other'
+      ];
+      if (validBillTypes.includes(bill_type)) {
+        filter.bill_type = bill_type;
+      }
+    }
+
+    // Validate dates
     if (date) {
+      if (!isValidDateString(date)) {
+        return res.status(400).json({ success: false, message: 'Invalid date format' });
+      }
       const start = new Date(date);
       const end = new Date(date);
       end.setDate(end.getDate() + 1);
       filter.bill_date = { $gte: start, $lt: end };
     }
+
     if (month) {
+      // Validate month format (YYYY-MM)
+      if (!/^\d{4}-\d{2}$/.test(month)) {
+        return res.status(400).json({ success: false, message: 'Invalid month format. Use YYYY-MM' });
+      }
       const [y, m] = month.split('-');
       const start = new Date(`${y}-${m}-01`);
+      if (isNaN(start.getTime())) {
+        return res.status(400).json({ success: false, message: 'Invalid month value' });
+      }
       const end = new Date(start);
       end.setMonth(end.getMonth() + 1);
       filter.bill_date = { $gte: start, $lt: end };
@@ -1354,17 +1769,29 @@ exports.getBills = async (req, res) => {
 exports.downloadBill = async (req, res) => {
   try {
     const labId = req.user.lab_id;
-    if (!labId) return res.status(403).json({ success: false, message: 'Lab access denied' });
+
+    // Validate labId and request ID
+    if (!labId || !isValidObjectId(labId)) {
+      return res.status(403).json({ success: false, message: 'Lab access denied' });
+    }
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: 'Invalid bill ID' });
+    }
 
     const bill = await Bill.findOne({ _id: req.params.id, lab_id: labId });
-    if (!bill) return res.status(404).json({ success: false, message: 'Bill not found or unauthorized' });
+    if (!bill) {
+      return res.status(404).json({ success: false, message: 'Bill not found or unauthorized' });
+    }
 
     const stream = await s3.send(new GetObjectCommand({
       Bucket: process.env.AWS_S3_BUCKET, Key: bill.s3_key
     }));
 
+    // Sanitize filename to prevent header injection
+    const safeFilename = sanitizeFilename(bill.title || 'bill');
+
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${bill.title}.pdf"`);
+    res.setHeader('Content-Disposition', `inline; filename="${safeFilename}.pdf"`);
     stream.Body.pipe(res);
 
   } catch (err) {
@@ -1383,18 +1810,45 @@ exports.downloadBill = async (req, res) => {
 
 /* ============================
    1. DAMAGED ASSET HISTORY (FILTERABLE + PAGINATED)
-   GET /api/admin/damaged-assets/history
-   ?status=&item=&vendor=&from=&to=&page=&limit=
 ============================ */
 exports.getDamagedAssetHistory = async (req, res) => {
   try {
     const labId = req.user.lab_id;
-    if (!labId) return res.status(403).json({ success: false, message: 'Lab access denied' });
+    if (!labId || !isValidObjectId(labId)) {
+      return res.status(403).json({ success: false, message: 'Lab access denied' });
+    }
 
     const { item, vendor, status, from, to } = req.query;
+
+    // Validate pagination
     const page  = Math.max(parseInt(req.query.page)  || 1,  1);
-    const limit = Math.min(parseInt(req.query.limit) || 25, 100);
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 25, 1), 100);
     const skip  = (page - 1) * limit;
+
+    // Validate status
+    let validatedStatus = null;
+    if (status) {
+      const validStatuses = ['damaged', 'under_repair', 'repaired', 'replaced', 'disposed'];
+      if (validStatuses.includes(status)) {
+        validatedStatus = status;
+      }
+    }
+
+    // Validate and sanitize date ranges
+    let fromDate = null;
+    let toDate = null;
+    if (from) {
+      if (!isValidDateString(from)) {
+        return res.status(400).json({ success: false, message: 'Invalid from date format' });
+      }
+      fromDate = new Date(from);
+    }
+    if (to) {
+      if (!isValidDateString(to)) {
+        return res.status(400).json({ success: false, message: 'Invalid to date format' });
+      }
+      toDate = new Date(to);
+    }
 
     /* ── Build pipeline ── */
     const pipeline = [
@@ -1423,19 +1877,19 @@ exports.getDamagedAssetHistory = async (req, res) => {
       { $unwind: '$item' },
 
       /* Filters */
-      ...(status ? [{ $match: { status } }] : []),
-      ...(from || to
+      ...(validatedStatus ? [{ $match: { status: validatedStatus } }] : []),
+      ...(fromDate || toDate
         ? [{
             $match: {
               reported_at: {
-                ...(from ? { $gte: new Date(from) } : {}),
-                ...(to   ? { $lte: new Date(to)   } : {})
+                ...(fromDate ? { $gte: fromDate } : {}),
+                ...(toDate   ? { $lte: toDate   } : {})
               }
             }
           }]
         : []),
-      ...(vendor ? [{ $match: { 'asset.vendor': new RegExp(vendor, 'i') } }] : []),
-      ...(item   ? [{ $match: { 'item.name':    new RegExp(item,   'i') } }] : []),
+      ...(vendor ? [{ $match: { 'asset.vendor': new RegExp(escapeRegex(sanitizeText(vendor, 100)), 'i') } }] : []),
+      ...(item   ? [{ $match: { 'item.name':    new RegExp(escapeRegex(sanitizeText(item, 100)),   'i') } }] : []),
 
       { $sort: { reported_at: -1 } },
 
@@ -1493,7 +1947,6 @@ exports.getDamagedAssetHistory = async (req, res) => {
 
 /* ============================
    2. CURRENT DAMAGED / UNDER-REPAIR (SUMMARY)
-   GET /api/admin/damaged-assets
 ============================ */
 exports.getCurrentDamagedAssets = async (req, res) => {
   try {
@@ -1522,7 +1975,6 @@ exports.getCurrentDamagedAssets = async (req, res) => {
 
 /* ============================
    3. UNDER-REPAIR LIST
-   GET /api/admin/damaged-assets/under-repair/list
 ============================ */
 exports.getUnderRepairAssets = async (req, res) => {
   try {
@@ -1544,7 +1996,6 @@ exports.getUnderRepairAssets = async (req, res) => {
 
 /* ============================
    4. UPDATE DAMAGE STATUS
-   PATCH /api/admin/damaged-assets/:id/status
 ============================ */
 exports.updateDamageStatus = async (req, res) => {
   const session = await mongoose.startSession();
@@ -1620,11 +2071,14 @@ exports.updateDamageStatus = async (req, res) => {
 
 /* ============================
    5. SINGLE DAMAGE RECORD DETAIL
-   GET /api/admin/damaged-assets/:id
-   ❗ Register this route LAST in the router
 ============================ */
 exports.getDamagedAssetDetail = async (req, res) => {
   try {
+    // Validate ID parameter
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: 'Invalid damage record ID' });
+    }
+
     const record = await DamagedAssetLog.findById(req.params.id)
       .populate({
         path: 'asset_id',
@@ -1660,18 +2114,26 @@ exports.getLabAvailableItems = async (req, res) => {
   try {
     const { labId } = req.params;
 
+    // Validate labId
+    if (!labId || !isValidObjectId(labId)) {
+      return res.status(400).json({ success: false, message: 'Invalid lab ID' });
+    }
+
+    // Validate pagination
     const page  = Math.max(parseInt(req.query.page)  || 1,  1);
-    const limit = Math.min(parseInt(req.query.limit) || 25, 100);
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 25, 1), 100);
     const skip  = (page - 1) * limit;
-    const search = (req.query.search || '').trim();
+
+    // Sanitize search input
+    const search = req.query.search ? sanitizeText(req.query.search.trim(), 100) : '';
 
     const searchMatch = search
       ? {
           $or: [
-            { 'item.name':     new RegExp(`^${search}`, 'i') },
-            { 'item.sku':      new RegExp(`^${search}`, 'i') },
-            { 'item.category': new RegExp(`^${search}`, 'i') },
-            { 'item.tracking_type': new RegExp(`^${search}`, 'i') }
+            { 'item.name':     new RegExp(`^${escapeRegex(search)}`, 'i') },
+            { 'item.sku':      new RegExp(`^${escapeRegex(search)}`, 'i') },
+            { 'item.category': new RegExp(`^${escapeRegex(search)}`, 'i') },
+            { 'item.tracking_type': new RegExp(`^${escapeRegex(search)}`, 'i') }
           ]
         }
       : null;
@@ -1765,8 +2227,45 @@ exports.createTransferRequest = async (req, res) => {
     const sourceLabId = req.user.lab_id;
     const { target_lab_id, items, transfer_type, expected_return_date } = req.body;
 
-    if (!sourceLabId || sourceLabId.toString() === target_lab_id.toString()) {
-      return res.status(400).json({ message: 'Invalid target lab' });
+    // Validate source lab ID
+    if (!sourceLabId || !isValidObjectId(sourceLabId)) {
+      return res.status(403).json({ message: 'Lab access denied' });
+    }
+
+    // Validate target lab ID
+    if (!target_lab_id || !isValidObjectId(target_lab_id)) {
+      return res.status(400).json({ message: 'Invalid target lab ID' });
+    }
+
+    if (sourceLabId.toString() === target_lab_id.toString()) {
+      return res.status(400).json({ message: 'Source and target labs cannot be the same' });
+    }
+
+    // Validate transfer_type
+    if (!transfer_type || !['temporary', 'permanent'].includes(transfer_type)) {
+      return res.status(400).json({ message: 'Invalid transfer type. Must be temporary or permanent' });
+    }
+
+    // Validate items array
+    if (!items || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ message: 'Items array is required and must not be empty' });
+    }
+
+    // Validate each item
+    for (const item of items) {
+      if (!item.item_id || !isValidObjectId(item.item_id)) {
+        return res.status(400).json({ message: 'Invalid item ID in items array' });
+      }
+      if (!isValidPositiveInteger(item.quantity)) {
+        return res.status(400).json({ message: 'Invalid quantity in items array. Must be a positive integer' });
+      }
+    }
+
+    // Validate expected_return_date for temporary transfers
+    if (transfer_type === 'temporary') {
+      if (!expected_return_date || !isValidDateString(expected_return_date)) {
+        return res.status(400).json({ message: 'Valid expected return date is required for temporary transfers' });
+      }
     }
 
     const transaction = await Transaction.create({
@@ -1779,12 +2278,17 @@ exports.createTransferRequest = async (req, res) => {
       student_reg_no: 'LAB-TRANSFER',
       status: 'raised',
       expected_return_date: transfer_type === 'temporary' ? new Date(expected_return_date) : null,
-      items: items.map(i => ({ lab_id: target_lab_id, item_id: i.item_id, quantity: i.quantity }))
+      items: items.map(i => ({
+        lab_id: target_lab_id,
+        item_id: i.item_id,
+        quantity: Number(i.quantity)
+      }))
     });
 
     res.status(201).json({ success: true, data: transaction });
 
   } catch (err) {
+    console.error('CREATE TRANSFER REQUEST ERROR:', err);
     res.status(500).json({ success: false, message: err.message });
   }
 };
@@ -2025,17 +2529,31 @@ exports.completeReturn = async (req, res) => {
 exports.getAssetTransactionHistory = async (req, res) => {
   try {
     const labId = req.user.lab_id;
-    if (!labId) return res.status(403).json({ success: false, message: 'Lab access denied' });
+    if (!labId || !isValidObjectId(labId)) {
+      return res.status(403).json({ success: false, message: 'Lab access denied' });
+    }
 
     const { assetTag } = req.params;
 
+    // Validate and sanitize asset tag
+    if (!assetTag || !assetTag.trim()) {
+      return res.status(400).json({ success: false, message: 'Asset tag is required' });
+    }
+
+    const sanitizedAssetTag = sanitizeText(assetTag, 100).toUpperCase().trim();
+    if (!isValidAlphanumeric(sanitizedAssetTag, false, true)) {
+      return res.status(400).json({ success: false, message: 'Invalid asset tag format' });
+    }
+
     // Find asset by tag
     const asset = await ItemAsset.findOne({
-      asset_tag: assetTag.toUpperCase().trim(),
+      asset_tag: sanitizedAssetTag,
       lab_id: labId
     }).lean();
 
-    if (!asset) return res.status(404).json({ success: false, message: 'Asset not found' });
+    if (!asset) {
+      return res.status(404).json({ success: false, message: 'Asset not found' });
+    }
 
     // Find last 3 transactions containing this asset
     const transactions = await Transaction.find({
@@ -2084,17 +2602,41 @@ exports.markAssetDamaged = async (req, res) => {
 
   try {
     const labId = req.user.lab_id;
-    if (!labId) throw new Error('Lab access denied');
+    if (!labId || !isValidObjectId(labId)) {
+      throw new Error('Lab access denied');
+    }
 
     const { asset_tag, transaction_id, damage_reason, remarks = '', type } = req.body;
 
-    if (!asset_tag?.trim()) throw new Error('Asset tag is required');
-    if (!damage_reason?.trim()) throw new Error('Damage reason is required');
-    if (!['transaction', 'normal'].includes(type)) throw new Error('Type must be "transaction" or "normal"');
+    // Validate required fields
+    if (!asset_tag?.trim()) {
+      throw new Error('Asset tag is required');
+    }
+    if (!damage_reason?.trim()) {
+      throw new Error('Damage reason is required');
+    }
+    if (!['transaction', 'normal'].includes(type)) {
+      throw new Error('Type must be "transaction" or "normal"');
+    }
+
+    // Sanitize inputs
+    const sanitizedAssetTag = sanitizeText(asset_tag.trim(), 100).toUpperCase();
+    const sanitizedDamageReason = sanitizeText(damage_reason.trim(), 500);
+    const sanitizedRemarks = sanitizeText(remarks.trim(), 1000);
+
+    // Validate asset tag format (should be alphanumeric with hyphens)
+    if (!isValidAlphanumeric(sanitizedAssetTag, false, true)) {
+      throw new Error('Invalid asset tag format');
+    }
+
+    // Validate transaction_id if provided
+    if (transaction_id && !sanitizeText(transaction_id, 100).trim()) {
+      throw new Error('Invalid transaction ID');
+    }
 
     // Find the asset
     const asset = await ItemAsset.findOne({
-      asset_tag: asset_tag.trim().toUpperCase(),
+      asset_tag: sanitizedAssetTag,
       lab_id: labId
     }).session(session);
 
@@ -2113,9 +2655,11 @@ exports.markAssetDamaged = async (req, res) => {
     let facultyId = '';
 
     if (type === 'transaction' && transaction_id) {
+      const sanitizedTxnId = sanitizeText(transaction_id.trim(), 100);
+
       // Verify transaction exists and contains this asset
       transaction = await Transaction.findOne({
-        transaction_id: transaction_id.trim(),
+        transaction_id: sanitizedTxnId,
         'items.asset_ids': asset._id,
         status: { $in: ['active', 'return_requested', 'partial_returned', 'completed', 'overdue'] }
       }).session(session);
@@ -2140,8 +2684,8 @@ exports.markAssetDamaged = async (req, res) => {
       student_id: student?._id || null,
       faculty_id: facultyId || null,
       faculty_email: facultyEmail || null,
-      damage_reason: damage_reason.trim(),
-      remarks: remarks.trim(),
+      damage_reason: sanitizedDamageReason,
+      remarks: sanitizedRemarks,
       status: 'damaged',
       reported_at: new Date()
     }], { session });
@@ -2172,12 +2716,12 @@ exports.markAssetDamaged = async (req, res) => {
     if (type === 'transaction' && transaction) {
       const damageDetails = {
         asset_tag: asset.asset_tag,
-        asset_name: item.name,
-        damage_reason: damage_reason.trim(),
+        asset_name: sanitizeText(item.name, 100),
+        damage_reason: sanitizedDamageReason,
         transaction_id: transaction.transaction_id,
-        project_name: transaction.project_name,
+        project_name: sanitizeText(transaction.project_name || '', 100),
         student_reg_no: transaction.student_reg_no,
-        student_name: student?.name || 'Student'
+        student_name: sanitizeText(student?.name || 'Student', 100)
       };
 
       // Email to student

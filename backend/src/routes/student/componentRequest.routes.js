@@ -1,8 +1,7 @@
 const express = require('express');
 const router = express.Router();
 
-const auth = require('../../middlewares/auth.middleware');
-const role = require('../../middlewares/role.middleware');
+const { validatePaginationParams } = require('../../middlewares/paramValidator.middleware');
 
 const {
   requestComponent,
@@ -13,13 +12,11 @@ const {
 /* =====================================================
    STUDENT COMPONENT REQUEST ROUTES
    Base Path: /api/student/component-requests
+   Auth applied at index.js level
 ===================================================== */
 
-// 🔐 Student-only access
-router.use(auth, role('student'));
-
-
-router.get('/labs',getAllLabsForStudents);
+// Get all labs for component requests
+router.get('/labs', getAllLabsForStudents);
 
 /* ============================
    CREATE COMPONENT REQUEST
@@ -31,6 +28,6 @@ router.post('/', requestComponent);
    GET MY COMPONENT REQUESTS
    GET /api/student/component-requests
 ============================ */
-router.get('/', getMyComponentRequests);
+router.get('/', validatePaginationParams, getMyComponentRequests);
 
 module.exports = router;

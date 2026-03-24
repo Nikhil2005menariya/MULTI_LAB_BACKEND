@@ -1,8 +1,7 @@
 const express = require('express');
 const router = express.Router({ mergeParams: true });
 
-const auth = require('../../middlewares/auth.middleware');
-const role = require('../../middlewares/role.middleware');
+const { validateObjectId } = require('../../middlewares/paramValidator.middleware');
 
 const {
   getLabStaff,
@@ -15,9 +14,8 @@ const {
 /* =====================================================
    SUPER ADMIN – LAB STAFF MANAGEMENT
    Mounted at: /api/super-admin/labs/:labId
+   Auth applied at index.js level
 ===================================================== */
-
-router.use(auth, role('super_admin'));
 
 /* ============================
    GET ALL STAFF
@@ -41,7 +39,7 @@ router.post('/assistants', addAssistant);
    REMOVE ASSISTANT
    DELETE /labs/:labId/assistants/:staffId
 ============================ */
-router.delete('/assistants/:staffId', removeAssistant);
+router.delete('/assistants/:staffId', validateObjectId('staffId'), removeAssistant);
 
 /* ============================
    CHANGE INCHARGE

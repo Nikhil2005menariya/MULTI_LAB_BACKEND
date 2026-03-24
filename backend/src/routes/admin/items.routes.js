@@ -3,6 +3,7 @@ const router = express.Router();
 
 const auth = require('../../middlewares/auth.middleware');
 const role = require('../../middlewares/role.middleware');
+const { validateObjectId, validateAssetTag, sanitizeSearch } = require('../../middlewares/paramValidator.middleware');
 
 const {
   addItem,
@@ -22,27 +23,33 @@ router.use(auth, role('incharge'));
 router.post('/', addItem);
 
 // POST - mark asset as damaged
-router.post('/:id/mark-damaged', markAssetDamaged);
+router.post('/:id/mark-damaged', validateObjectId('id'), markAssetDamaged);
 
 // PUT - update item details / quantity
-router.put('/:id', updateItem);
+router.put('/:id', validateObjectId('id'), updateItem);
 
 // DELETE - soft delete item
-router.delete('/:id', removeItem);
+router.delete('/:id', validateObjectId('id'), removeItem);
 
-router.get('/search', searchItemsByPrefix);
+// GET - search items (sanitize search query)
+router.get('/search', sanitizeSearch(['q', 'query', 'prefix']), searchItemsByPrefix);
 
-// GET - asset transaction history (must be before /:id routes that end with different paths)
-router.get('/:id/assets/:assetTag/transactions', getAssetTransactionHistory);
+// GET - asset transaction history (validate both params)
+router.get(
+  '/:id/assets/:assetTag/transactions',
+  validateObjectId('id'),
+  validateAssetTag('assetTag'),
+  getAssetTransactionHistory
+);
 
 // GET - view all items
 router.get('/', getAllItems);
 
 // GET - view single item
-router.get('/:id', getItemById);
+router.get('/:id', validateObjectId('id'), getItemById);
 
 // GET - item assets
-router.get('/:id/assets', getItemAssets);
+router.get('/:id/assets', validateObjectId('id'), getItemAssets);
 
 
 module.exports = router;

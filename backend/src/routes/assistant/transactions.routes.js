@@ -1,8 +1,12 @@
 const express = require('express');
 const router = express.Router();
 
-const auth = require('../../middlewares/auth.middleware');
-const role = require('../../middlewares/role.middleware');
+const {
+  validateObjectId,
+  validateTransactionId,
+  sanitizeSearch,
+  validatePaginationParams
+} = require('../../middlewares/paramValidator.middleware');
 
 const {
   issueTransaction,
@@ -10,12 +14,14 @@ const {
   getActiveTransactions,
   getPendingTransactions,
   getAvailableAssetsByItem,
-  searchPendingTransactions,   // ✅ new
-  searchActiveTransactions,    // ✅ new
+  searchPendingTransactions,
+  searchActiveTransactions,
 } = require('../../controllers/assistant.controller');
 
-// 🔐 Assistant only
-router.use(auth, role('assistant'));
+/* =====================================================
+   ASSISTANT TRANSACTION ROUTES
+   Auth applied at index.js level
+===================================================== */
 
 /* ============================
    STATIC ROUTES FIRST
@@ -23,19 +29,42 @@ router.use(auth, role('assistant'));
    to avoid param collision)
 ============================ */
 
-router.get('/pending',                getPendingTransactions);
-router.get('/pending/search',         searchPendingTransactions);  // ✅ new
+router.get('/pending', validatePaginationParams, getPendingTransactions);
+router.get(
+  '/pending/search',
+  sanitizeSearch(['q', 'query', 'search']),
+  validatePaginationParams,
+  searchPendingTransactions
+);
 
-router.get('/active',                 getActiveTransactions);
-router.get('/active/search',          searchActiveTransactions);   // ✅ new
+router.get('/active', validatePaginationParams, getActiveTransactions);
+router.get(
+  '/active/search',
+  sanitizeSearch(['q', 'query', 'search']),
+  validatePaginationParams,
+  searchActiveTransactions
+);
 
-router.get('/assets/:itemId/available', getAvailableAssetsByItem);
+router.get(
+  '/assets/:itemId/available',
+  validateObjectId('itemId'),
+  getAvailableAssetsByItem
+);
 
 /* ============================
    PARAM ROUTES LAST
 ============================ */
 
-router.post('/:transaction_id/issue',   issueTransaction);
-router.post('/:transaction_id/return',  returnTransaction);
+router.post(
+  '/:transaction_id/issue',
+  validateTransactionId('transaction_id'),
+  issueTransaction
+);
+
+router.post(
+  '/:transaction_id/return',
+  validateTransactionId('transaction_id'),
+  returnTransaction
+);
 
 module.exports = router;
