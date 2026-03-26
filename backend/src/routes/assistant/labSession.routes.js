@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 
 const {
-  validateObjectId,
+   validateTransactionId,
   sanitizeSearch,
   validatePaginationParams
 } = require('../../middlewares/paramValidator.middleware');
@@ -56,7 +56,7 @@ router.get('/active', validatePaginationParams, getActiveLabSessions);
 ============================ */
 router.post(
   '/:transaction_id/return',
-  validateObjectId('transaction_id'),
+   validateTransactionId('transaction_id'),
   returnTransaction
 );
 

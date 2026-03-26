@@ -17,12 +17,14 @@ const isValidAssetTag = (tag) => {
   return /^[a-zA-Z0-9_-]{1,50}$/.test(tag);
 };
 
-// Validate transaction ID format (TXN-XXXXXXXX or ObjectId)
+// Validate transaction ID format (human-readable ID or ObjectId)
 const isValidTransactionId = (id) => {
   if (!id || typeof id !== 'string') return false;
-  // Accept TXN-format or 24-char hex (ObjectId) or any reasonable string
-  if (/^TXN-/.test(id)) return true; // TXN-* format
-  if (mongoose.Types.ObjectId.isValid(id) && /^[a-fA-F0-9]{24}$/.test(id)) return true; // ObjectId
+  const trimmed = id.trim();
+  // Accept common app transaction IDs like LAB-..., TR-..., TXN-... and similar safe IDs.
+  if (/^[A-Za-z0-9][A-Za-z0-9_-]{1,99}$/.test(trimmed)) return true;
+  // Accept Mongo ObjectId form as well.
+  if (mongoose.Types.ObjectId.isValid(trimmed) && /^[a-fA-F0-9]{24}$/.test(trimmed)) return true;
   return false;
 };
 

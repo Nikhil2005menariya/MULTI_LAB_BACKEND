@@ -734,7 +734,7 @@ exports.issueLabSession = async (req, res) => {
 
         const assetIds = [];
         for (const asset of assets) {
-          asset.status = ' issued';
+          asset.status = 'issued';
           asset.last_transaction_id = txn._id;
           await asset.save({ session });
           assetIds.push(asset._id);
