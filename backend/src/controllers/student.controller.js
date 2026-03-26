@@ -432,23 +432,149 @@ exports.raiseTransaction = async (req, res) => {
     const escapedStudentName = escapeHtml(student.name);
     const escapedProjectName = escapeHtml(sanitizedProjectName);
 
+    // Fetch lab and item details for email
+    const itemDetailsPromises = normalizedItems.map(async (item) => {
+      const [lab, itemData] = await Promise.all([
+        Lab.findById(item.lab_id).lean(),
+        Item.findById(item.item_id).lean()
+      ]);
+      return {
+        labName: lab?.name || 'Unknown Lab',
+        labCode: lab?.code || 'N/A',
+        itemName: itemData?.name || 'Unknown Item',
+        itemSku: itemData?.sku || 'N/A',
+        quantity: item.quantity
+      };
+    });
+
+    const itemDetails = await Promise.all(itemDetailsPromises);
+
+    // Generate component rows for email
+    const componentRows = itemDetails.map((detail) => `
+      <tr>
+        <td style="padding:12px;border-bottom:1px solid #e5e7eb;">
+          <div style="font-weight:600;color:#1f2937;">${escapeHtml(detail.itemName)}</div>
+          <div style="font-size:13px;color:#6b7280;">SKU: ${escapeHtml(detail.itemSku)}</div>
+        </td>
+        <td style="padding:12px;border-bottom:1px solid #e5e7eb;color:#4b5563;">
+          ${escapeHtml(detail.labName)} (${escapeHtml(detail.labCode)})
+        </td>
+        <td style="padding:12px;border-bottom:1px solid #e5e7eb;text-align:center;font-weight:600;color:#1f2937;">
+          ${detail.quantity}
+        </td>
+      </tr>
+    `).join('');
+
     await sendMail({
       to: faculty_email,
-      subject: `Approval Required – ${transactionId}`,
+      subject: `VLabs Approval Required – ${transactionId}`,
       html: `
-        <h2>IoT Lab Borrow Request</h2>
-        <p><strong>Student:</strong> ${escapedStudentName} (${escapeHtml(student.reg_no)})</p>
-        <p><strong>Project:</strong> ${escapedProjectName}</p>
-        <p><strong>Transaction ID:</strong> ${transactionId}</p>
-        <p><strong>Expected Return:</strong> ${new Date(expected_return_date).toDateString()}</p>
-        <br/>
-        <a href="${approvalLink}"
-           style="background:#2563eb;color:white;padding:10px 18px;
-                  text-decoration:none;border-radius:6px;">
-           Approve Request
-        </a>
-        <br/><br/>
-        <p>If you did not expect this request, you may ignore this email.</p>
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        </head>
+        <body style="margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;background-color:#f3f4f6;">
+          <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f3f4f6;padding:40px 20px;">
+            <tr>
+              <td align="center">
+                <table width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:12px;box-shadow:0 4px 6px rgba(0,0,0,0.1);overflow:hidden;">
+
+                  <!-- Header -->
+                  <tr>
+                    <td style="background:linear-gradient(135deg,#2563eb 0%,#1e40af 100%);padding:32px 40px;text-align:center;">
+                      <h1 style="margin:0;color:#ffffff;font-size:28px;font-weight:700;letter-spacing:-0.5px;">VLabs</h1>
+                      <p style="margin:8px 0 0 0;color:#dbeafe;font-size:15px;">VIT Chennai Laboratory Management System</p>
+                    </td>
+                  </tr>
+
+                  <!-- Content -->
+                  <tr>
+                    <td style="padding:40px;">
+
+                      <h2 style="margin:0 0 8px 0;color:#1f2937;font-size:22px;font-weight:700;">Component Approval Request</h2>
+                      <p style="margin:0 0 32px 0;color:#6b7280;font-size:15px;">A student has requested to borrow components from the lab.</p>
+
+                      <!-- Info Card -->
+                      <div style="background-color:#f9fafb;border-left:4px solid #2563eb;padding:20px;margin-bottom:32px;border-radius:6px;">
+                        <table width="100%" cellpadding="0" cellspacing="0">
+                          <tr>
+                            <td style="padding:8px 0;">
+                              <span style="color:#6b7280;font-size:14px;">Student</span>
+                              <div style="color:#1f2937;font-weight:600;font-size:16px;margin-top:4px;">${escapedStudentName}</div>
+                              <div style="color:#6b7280;font-size:14px;margin-top:2px;">Reg No: ${escapeHtml(student.reg_no)}</div>
+                            </td>
+                          </tr>
+                          <tr>
+                            <td style="padding:8px 0;">
+                              <span style="color:#6b7280;font-size:14px;">Project Name</span>
+                              <div style="color:#1f2937;font-weight:600;font-size:16px;margin-top:4px;">${escapedProjectName}</div>
+                            </td>
+                          </tr>
+                          <tr>
+                            <td style="padding:8px 0;">
+                              <span style="color:#6b7280;font-size:14px;">Transaction ID</span>
+                              <div style="color:#1f2937;font-weight:600;font-family:monospace;font-size:15px;margin-top:4px;">${transactionId}</div>
+                            </td>
+                          </tr>
+                          <tr>
+                            <td style="padding:8px 0;">
+                              <span style="color:#6b7280;font-size:14px;">Expected Return Date</span>
+                              <div style="color:#1f2937;font-weight:600;font-size:16px;margin-top:4px;">${new Date(expected_return_date).toLocaleDateString('en-IN', { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' })}</div>
+                            </td>
+                          </tr>
+                        </table>
+                      </div>
+
+                      <!-- Components Table -->
+                      <h3 style="margin:0 0 16px 0;color:#1f2937;font-size:18px;font-weight:600;">Requested Components</h3>
+                      <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;">
+                        <thead>
+                          <tr style="background-color:#f9fafb;">
+                            <th style="padding:12px;text-align:left;font-size:13px;font-weight:600;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px;">Component</th>
+                            <th style="padding:12px;text-align:left;font-size:13px;font-weight:600;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px;">Lab</th>
+                            <th style="padding:12px;text-align:center;font-size:13px;font-weight:600;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px;">Qty</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          ${componentRows}
+                        </tbody>
+                      </table>
+
+                      <!-- CTA Button -->
+                      <div style="text-align:center;margin-top:40px;">
+                        <a href="${approvalLink}"
+                           style="display:inline-block;background:linear-gradient(135deg,#2563eb 0%,#1e40af 100%);color:#ffffff;padding:16px 40px;text-decoration:none;border-radius:8px;font-weight:600;font-size:16px;box-shadow:0 4px 6px rgba(37,99,235,0.3);">
+                          Review & Approve Request
+                        </a>
+                      </div>
+
+                      <!-- Footer Note -->
+                      <div style="margin-top:32px;padding-top:24px;border-top:1px solid #e5e7eb;">
+                        <p style="margin:0;color:#9ca3af;font-size:14px;text-align:center;">
+                          If you did not expect this request, please contact the lab administrator or ignore this email.
+                        </p>
+                      </div>
+
+                    </td>
+                  </tr>
+
+                  <!-- Footer -->
+                  <tr>
+                    <td style="background-color:#f9fafb;padding:24px 40px;text-align:center;border-top:1px solid #e5e7eb;">
+                      <p style="margin:0;color:#9ca3af;font-size:13px;">
+                        © ${new Date().getFullYear()} VLabs - VIT Chennai. All rights reserved.
+                      </p>
+                    </td>
+                  </tr>
+
+                </table>
+              </td>
+            </tr>
+          </table>
+        </body>
+        </html>
       `
     });
 
