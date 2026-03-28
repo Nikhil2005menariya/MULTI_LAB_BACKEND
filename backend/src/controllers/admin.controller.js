@@ -427,6 +427,51 @@ exports.updateItem = async (req, res) => {
     const inventory = await LabInventory.findOne({ lab_id: labId, item_id: item._id });
     if (!inventory) return res.status(404).json({ error: 'Item not found in this lab' });
 
+    // Handle asset removal
+    if (Array.isArray(req.body.remove_asset_tags) && req.body.remove_asset_tags.length > 0) {
+      if (item.tracking_type !== 'asset') {
+        return res.status(400).json({ error: 'Asset removal only applies to asset-tracked items' });
+      }
+
+      const assetsToRemove = req.body.remove_asset_tags;
+
+      // Verify all assets exist and belong to this lab/item
+      const assetsToRetire = await ItemAsset.find({
+        lab_id: labId,
+        item_id: item._id,
+        asset_tag: { $in: assetsToRemove }
+      });
+
+      if (assetsToRetire.length !== assetsToRemove.length) {
+        return res.status(400).json({ error: 'Some asset tags were not found or do not belong to this item' });
+      }
+
+      // Mark assets as retired
+      await ItemAsset.updateMany(
+        {
+          lab_id: labId,
+          item_id: item._id,
+          asset_tag: { $in: assetsToRemove }
+        },
+        {
+          status: 'retired',
+          condition: 'retired'
+        }
+      );
+
+      // Update inventory
+      inventory.total_quantity = Math.max(0, inventory.total_quantity - assetsToRemove.length);
+
+      // Recalculate available quantity from database
+      const actualAvailable = await ItemAsset.countDocuments({
+        lab_id: labId,
+        item_id: item._id,
+        status: 'available',
+        condition: 'good'
+      });
+      inventory.available_quantity = actualAvailable;
+    }
+
     if (addQty > 0) {
       if (item.tracking_type === 'bulk') {
         inventory.total_quantity += addQty;
