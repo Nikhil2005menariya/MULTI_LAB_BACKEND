@@ -32,7 +32,7 @@ const createRateLimiter = (options = {}) => {
 // Login endpoint - strict limit
 const loginLimiter = createRateLimiter({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 5, // 5 attempts
+  max: 50, // 50 attempts for testing
   message: 'Too many login attempts, please try again after 15 minutes'
 });
 
@@ -67,7 +67,7 @@ const emailChangeLimiter = createRateLimiter({
 // API general - higher limit for authenticated routes
 const apiLimiter = createRateLimiter({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 300, // 300 requests per 15 minutes
+  max: 1000, // 1000 requests per 15 minutes for testing
   message: 'Too many requests, please slow down'
 });
 
@@ -81,7 +81,7 @@ const uploadLimiter = createRateLimiter({
 // Search endpoints - moderate limit
 const searchLimiter = createRateLimiter({
   windowMs: 60 * 1000, // 1 minute
-  max: 30, // 30 searches per minute
+  max: 200, // 200 searches per minute for testing
   message: 'Too many search requests, please slow down'
 });
 

@@ -130,10 +130,10 @@ const buildExistingStaffEmail = ({ name, email, role, labName, labCode, frontend
         <p style="margin:0;font-size:13px;color:#166534;line-height:1.7;">Your existing account (<strong>${escapedEmail}</strong>) has been updated with this new role. Use your current credentials to log in.</p>
       </div>
       <div style="text-align:center;margin-bottom:24px;">
-        <a href="${frontendUrl}/login" style="display:inline-block;background:linear-gradient(135deg,${roleGradientFrom},${roleGradientTo});color:#ffffff;text-decoration:none;font-size:15px;font-weight:700;padding:14px 40px;border-radius:10px;">Log In to Your Account →</a>
+        <a href="${frontendUrl}" style="display:inline-block;background:linear-gradient(135deg,${roleGradientFrom},${roleGradientTo});color:#ffffff;text-decoration:none;font-size:15px;font-weight:700;padding:14px 40px;border-radius:10px;">Log In to Your Account →</a>
       </div>
       <p style="margin:0;font-size:13px;color:#64748b;line-height:1.7;text-align:center;">
-        Forgot your password? <a href="${frontendUrl}/forgot-password" style="color:${roleColor};font-weight:600;">Reset it here</a>.
+        Forgot your password? <a href="${frontendUrl}" style="color:${roleColor};font-weight:600;">Reset it here</a>.
       </p>
     </div>
     <div style="background:#f8fafc;border-top:1px solid #e2e8f0;padding:20px 36px;text-align:center;">
@@ -208,10 +208,10 @@ const buildNewStaffEmail = ({ name, email, role, labName, labCode, tempPassword,
         <p style="margin:0;font-size:13px;color:#9a3412;line-height:1.7;"><strong>⚠️ Important:</strong> This is a temporary password. Please log in and change it immediately from your profile settings.</p>
       </div>
       <div style="text-align:center;margin-bottom:24px;">
-        <a href="${frontendUrl}/login" style="display:inline-block;background:linear-gradient(135deg,${roleGradientFrom},${roleGradientTo});color:#ffffff;text-decoration:none;font-size:15px;font-weight:700;padding:14px 40px;border-radius:10px;">Log In Now →</a>
+        <a href="${frontendUrl}" style="display:inline-block;background:linear-gradient(135deg,${roleGradientFrom},${roleGradientTo});color:#ffffff;text-decoration:none;font-size:15px;font-weight:700;padding:14px 40px;border-radius:10px;">Log In Now →</a>
       </div>
       <p style="margin:0;font-size:12px;color:#94a3b8;text-align:center;">
-        Or use <a href="${frontendUrl}/forgot-password" style="color:${roleColor};font-weight:600;">Forgot Password</a> to set your own password.
+        Or use <a href="${frontendUrl}" style="color:${roleColor};font-weight:600;">Forgot Password</a> to set your own password.
       </p>
     </div>
     <div style="background:#f8fafc;border-top:1px solid #e2e8f0;padding:20px 36px;text-align:center;">
