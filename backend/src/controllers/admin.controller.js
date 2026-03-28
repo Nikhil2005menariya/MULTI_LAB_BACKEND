@@ -1216,12 +1216,21 @@ exports.getLabSessions = async (req, res) => {
         .populate('student_id', 'name reg_no email')
         .populate('issued_by_incharge_id', 'name email')
         .populate('items.item_id', 'name sku tracking_type')
+        .populate('items.asset_ids', 'asset_tag serial_no')
         .sort({ createdAt: -1 }).skip(skip).limit(limit).lean()
     ]);
 
+    const formatted = records.map(t => ({
+      ...t,
+      items: t.items.map(i => ({
+        ...i,
+        asset_tags: i.asset_ids?.map(a => a.asset_tag) || []
+      }))
+    }));
+
     return res.json({
       success: true, page, limit, totalItems,
-      totalPages: Math.ceil(totalItems / limit), count: records.length, data: records
+      totalPages: Math.ceil(totalItems / limit), count: formatted.length, data: formatted
     });
 
   } catch (err) {
