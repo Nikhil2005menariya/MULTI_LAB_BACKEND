@@ -6,6 +6,12 @@ const hpp = require('hpp');
 const app = express();
 
 /* =========================
+   TRUST PROXY FOR RATE LIMITING
+   Required when running behind a proxy (ALB, nginx, etc.)
+========================= */
+app.set('trust proxy', 1);
+
+/* =========================
    SECURITY: Helmet Headers
    Sets various HTTP headers for security
 ========================= */

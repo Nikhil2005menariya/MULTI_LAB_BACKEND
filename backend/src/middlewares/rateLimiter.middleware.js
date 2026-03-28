@@ -13,7 +13,10 @@ const createRateLimiter = (options = {}) => {
     standardHeaders: true,
     legacyHeaders: false,
     skipSuccessfulRequests: options.skipSuccessfulRequests || false,
-    // Use default keyGenerator which handles IPv6 properly
+    // Custom keyGenerator to handle proxy headers correctly
+    keyGenerator: (req, res) => {
+      return req.ip || req.socket.remoteAddress;
+    },
     handler: (req, res) => {
       res.status(429).json({
         error: options.message || 'Too many requests, please try again later'
