@@ -299,7 +299,7 @@ exports.registerFaculty = async (req, res) => {
     });
 
     const verificationLink =
-      `${process.env.FRONTEND_URL}/faculty/verify?token=${verificationToken}`;
+      `${process.env.FRONTEND_URL}/faculty/verify-email?token=${verificationToken}`;
 
     // Escape name for HTML email to prevent XSS
     const escapedName = escapeHtml(sanitizedName);

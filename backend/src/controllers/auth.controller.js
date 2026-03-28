@@ -520,8 +520,7 @@ exports.registerFaculty = async (req, res) => {
       is_verified: false
     });
 
-    const verificationLink =
-      `${process.env.FRONTEND_URL}/faculty/verify?token=${verificationToken}`;
+    const verificationLink = `${process.env.FRONTEND_URL}/faculty/verify-email?token=${verificationToken}`;
 
     const escapedName = escapeHtml(name);
 
@@ -628,7 +627,7 @@ exports.resendFacultyVerificationEmail = async (req, res) => {
     faculty.verification_token_expiry = Date.now() + 1000 * 60 * 60;
     await faculty.save();
 
-    const verificationLink = `${process.env.FRONTEND_URL}/faculty/verify?token=${verificationToken}`;
+    const verificationLink = `${process.env.FRONTEND_URL}/faculty/verify-email?token=${verificationToken}`;
     const escapedName = escapeHtml(faculty.name);
 
     try {
