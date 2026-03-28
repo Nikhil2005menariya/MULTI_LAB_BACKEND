@@ -20,6 +20,9 @@ router.post('/register', registrationLimiter, facultyAuthController.registerFacu
 // Verify email
 router.get('/verify', otpLimiter, facultyAuthController.verifyEmail);
 
+// Resend verification email
+router.post('/resend-verification-email', registrationLimiter, facultyAuthController.resendFacultyVerificationEmail);
+
 // Set password (after verification)
 router.post('/set-password', otpLimiter, facultyAuthController.setPassword);
 

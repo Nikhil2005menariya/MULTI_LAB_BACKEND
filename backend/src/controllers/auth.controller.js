@@ -155,8 +155,13 @@ exports.registerStudent = async (req, res) => {
       $or: [{ reg_no }, { email }]
     });
 
-    if (exists) {
+    if (exists && exists.is_verified) {
       return res.status(400).json({ error: 'Student already exists' });
+    }
+
+    // If unverified account exists, delete it to allow re-registration
+    if (exists && !exists.is_verified) {
+      await Student.deleteOne({ _id: exists._id });
     }
 
     const verificationToken = crypto.randomBytes(32).toString('hex');
@@ -173,15 +178,24 @@ exports.registerStudent = async (req, res) => {
 
     const escapedName = escapeHtml(name);
 
-    await sendMail({
-      to: email,
-      subject: 'Verify your IoT Lab Account',
-      html: `
-        <p>Hello ${escapedName},</p>
-        <p>Click the link below to verify your account:</p>
-        <a href="${verifyLink}">Verify Email</a>
-      `
-    });
+    try {
+      await sendMail({
+        to: email,
+        subject: 'Verify your IoT Lab Account',
+        html: `
+          <p>Hello ${escapedName},</p>
+          <p>Click the link below to verify your account:</p>
+          <a href="${verifyLink}">Verify Email</a>
+        `
+      });
+    } catch (emailErr) {
+      // If email fails, delete the created student account
+      await Student.deleteOne({ _id: student._id });
+      console.error('Student registration - email send failed:', emailErr);
+      return res.status(500).json({
+        error: 'Failed to send verification email. Please try again later.'
+      });
+    }
 
     res.status(201).json({
       success: true,
@@ -222,6 +236,66 @@ exports.verifyStudentEmail = async (req, res) => {
   } catch (err) {
     console.error('Student email verification error:', err);
     res.status(500).json({ error: 'Verification failed' });
+  }
+};
+
+/* =====================================================
+   RESEND STUDENT VERIFICATION EMAIL
+===================================================== */
+exports.resendStudentVerificationEmail = async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ error: 'Email is required' });
+    }
+
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ error: 'Invalid email format' });
+    }
+
+    const student = await Student.findOne({ email }).select('+email_verification_token');
+
+    if (!student) {
+      return res.status(404).json({ error: 'Student account not found' });
+    }
+
+    if (student.is_verified) {
+      return res.status(400).json({ error: 'Email already verified' });
+    }
+
+    // Generate new verification token
+    const verificationToken = crypto.randomBytes(32).toString('hex');
+    student.email_verification_token = verificationToken;
+    await student.save();
+
+    const verifyLink = `${process.env.FRONTEND_URL}/verify-email?token=${verificationToken}`;
+    const escapedName = escapeHtml(student.name);
+
+    try {
+      await sendMail({
+        to: email,
+        subject: 'Verify your IoT Lab Account',
+        html: `
+          <p>Hello ${escapedName},</p>
+          <p>Click the link below to verify your account:</p>
+          <a href="${verifyLink}">Verify Email</a>
+        `
+      });
+    } catch (emailErr) {
+      console.error('Resend verification email failed:', emailErr);
+      return res.status(500).json({
+        error: 'Failed to send verification email. Please try again later.'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Verification email sent successfully'
+    });
+  } catch (err) {
+    console.error('Resend verification email error:', err);
+    res.status(500).json({ error: 'Failed to resend verification email' });
   }
 };
 
@@ -424,10 +498,15 @@ exports.registerFaculty = async (req, res) => {
 
     const existing = await Faculty.findOne({ email });
 
-    if (existing) {
+    if (existing && existing.is_verified) {
       return res.status(400).json({
         message: 'Faculty account already exists'
       });
+    }
+
+    // If unverified account exists, delete it to allow re-registration
+    if (existing && !existing.is_verified) {
+      await Faculty.deleteOne({ _id: existing._id });
     }
 
     const verificationToken = crypto.randomBytes(32).toString('hex');
@@ -446,15 +525,24 @@ exports.registerFaculty = async (req, res) => {
 
     const escapedName = escapeHtml(name);
 
-    await sendMail({
-      to: email,
-      subject: 'Verify Your Faculty Account',
-      html: `
-        <p>Hello ${escapedName},</p>
-        <p>Please verify your faculty account by clicking the link below:</p>
-        <a href="${verificationLink}">Verify Account</a>
-      `
-    });
+    try {
+      await sendMail({
+        to: email,
+        subject: 'Verify Your Faculty Account',
+        html: `
+          <p>Hello ${escapedName},</p>
+          <p>Please verify your faculty account by clicking the link below:</p>
+          <a href="${verificationLink}">Verify Account</a>
+        `
+      });
+    } catch (emailErr) {
+      // If email fails, delete the created faculty account
+      await Faculty.deleteOne({ _id: faculty._id });
+      console.error('Faculty registration - email send failed:', emailErr);
+      return res.status(500).json({
+        message: 'Failed to send verification email. Please try again later.'
+      });
+    }
 
     res.status(201).json({
       success: true,
@@ -506,6 +594,67 @@ exports.verifyEmail = async (req, res) => {
   } catch (err) {
     console.error('Verification error:', err);
     res.status(500).json({ message: 'Verification failed' });
+  }
+};
+
+/* =====================================================
+   RESEND FACULTY VERIFICATION EMAIL
+===================================================== */
+exports.resendFacultyVerificationEmail = async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ message: 'Email is required' });
+    }
+
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ message: 'Invalid email format' });
+    }
+
+    const faculty = await Faculty.findOne({ email }).select('+verification_token +verification_token_expiry');
+
+    if (!faculty) {
+      return res.status(404).json({ message: 'Faculty account not found' });
+    }
+
+    if (faculty.is_verified) {
+      return res.status(400).json({ message: 'Email already verified' });
+    }
+
+    // Generate new verification token with 1 hour expiry
+    const verificationToken = crypto.randomBytes(32).toString('hex');
+    faculty.verification_token = verificationToken;
+    faculty.verification_token_expiry = Date.now() + 1000 * 60 * 60;
+    await faculty.save();
+
+    const verificationLink = `${process.env.FRONTEND_URL}/faculty/verify?token=${verificationToken}`;
+    const escapedName = escapeHtml(faculty.name);
+
+    try {
+      await sendMail({
+        to: email,
+        subject: 'Verify Your Faculty Account',
+        html: `
+          <p>Hello ${escapedName},</p>
+          <p>Please verify your faculty account by clicking the link below:</p>
+          <a href="${verificationLink}">Verify Account</a>
+        `
+      });
+    } catch (emailErr) {
+      console.error('Resend faculty verification email failed:', emailErr);
+      return res.status(500).json({
+        message: 'Failed to send verification email. Please try again later.'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Verification email sent successfully'
+    });
+  } catch (err) {
+    console.error('Resend faculty verification email error:', err);
+    res.status(500).json({ message: 'Failed to resend verification email' });
   }
 };
 

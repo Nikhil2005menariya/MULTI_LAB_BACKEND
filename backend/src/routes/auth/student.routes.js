@@ -13,7 +13,8 @@ const {
   verifyStudentEmail,
   studentLogin,
   studentForgotPassword,
-  studentResetPassword
+  studentResetPassword,
+  resendStudentVerificationEmail
 } = require('../../controllers/auth.controller');
 
 // Registration with rate limit
@@ -21,6 +22,9 @@ router.post('/register', registrationLimiter, registerStudent);
 
 // Email verification with OTP limit
 router.get('/verify-email', otpLimiter, verifyStudentEmail);
+
+// Resend verification email with rate limit
+router.post('/resend-verification-email', registrationLimiter, resendStudentVerificationEmail);
 
 // Login with rate limit
 router.post('/login', loginLimiter, studentLogin);
