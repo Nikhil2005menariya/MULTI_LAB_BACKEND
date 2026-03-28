@@ -4,6 +4,7 @@ const LabInventory = require('../models/LabInventory');
 const ItemAsset = require('../models/ItemAsset');
 const DamagedAssetLog = require('../models/DamagedAssetLog');
 const Item = require('../models/Item');
+const Staff = require('../models/Staff');
 
 /* ============================
    INPUT VALIDATION & SANITIZATION UTILITIES
@@ -1237,5 +1238,35 @@ exports.searchActiveTransactions = async (req, res) => {
   } catch (err) {
     console.error('Search active transactions error:', err);
     return res.status(500).json({ error: 'Failed to search active transactions' });
+  }
+};
+
+/* ============================
+   GET ASSISTANT PROFILE
+============================ */
+exports.getAssistantProfile = async (req, res) => {
+  try {
+    const staffId = req.user.id;
+    if (!staffId || !isValidObjectId(staffId)) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+
+    const staff = await Staff.findById(staffId)
+      .select('name email role lab_id is_active last_login createdAt')
+      .populate('lab_id', 'name code')
+      .lean();
+
+    if (!staff) {
+      return res.status(404).json({ success: false, message: 'Profile not found' });
+    }
+
+    return res.json({
+      success: true,
+      data: staff
+    });
+
+  } catch (err) {
+    console.error('GET ASSISTANT PROFILE ERROR:', err);
+    return res.status(500).json({ success: false, message: 'Failed to fetch profile' });
   }
 };

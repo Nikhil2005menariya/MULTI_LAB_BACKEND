@@ -12,17 +12,16 @@ const {
   staffConfirmEmailChange,
 } = require('../../controllers/auth.controller');
 
-// Get assistant profile
-const { getAssistantProfile } = require('../../controllers/assistant.controller');
+// Get super admin profile
+const { getSuperAdminProfile } = require('../../controllers/super_admin.controller');
 
 /* =====================================================
-   LAB ASSISTANT PROFILE ROUTES
-   (Role: assistant)
-   Auth applied at index.js level
+   SUPER ADMIN PROFILE ROUTES
+   (Role: super_admin)
 ===================================================== */
 
 // Get profile
-router.get('/', getAssistantProfile);
+router.get('/', getSuperAdminProfile);
 
 // Change password with OTP rate limiting
 router.post('/change-password', otpLimiter, staffChangePassword);

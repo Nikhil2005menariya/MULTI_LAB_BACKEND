@@ -13,12 +13,18 @@ const {
   staffChangePassword
 } = require('../../controllers/auth.controller');
 
+// Get incharge profile
+const { getInchargeProfile } = require('../../controllers/admin.controller');
+
 /* =====================================================
    LAB INCHARGE PROFILE ROUTES
    (Only role: incharge)
 ===================================================== */
 
 router.use(auth, role('incharge'));
+
+// Get profile
+router.get('/', getInchargeProfile);
 
 // Change password
 router.post('/change-password', otpLimiter, staffChangePassword);

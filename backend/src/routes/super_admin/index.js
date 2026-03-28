@@ -11,6 +11,7 @@ router.use(auth, role('super_admin'));
 // Standalone routes
 router.use('/labs', require('./labs.routes'));
 router.use('/analytics', require('./analytics.routes'));
+router.use('/profile', require('./profile.routes'));
 
 // Lab-specific routes with labId validation
 router.use('/labs/:labId', validateLabId('labId'), require('./staff.routes'));
@@ -23,3 +24,4 @@ router.use('/labs/:labId/bills', validateLabId('labId'), require('./bills.routes
 router.use('/labs/:labId/damaged-assets', validateLabId('labId'), require('./damagedAssets.routes'));
 
 module.exports = router;
+
