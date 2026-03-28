@@ -322,12 +322,14 @@ exports.addItem = async (req, res) => {
 
     let item = await Item.findOne({ sku });
 
-    if (!item) {
-      item = await Item.create({
-        name, sku, category, description, tracking_type,
-        total_quantity: 0, available_quantity: 0
-      });
+    if (item) {
+      return res.status(400).json({ error: `An item with SKU "${sku}" already exists. Use a unique SKU.` });
     }
+
+    item = await Item.create({
+      name, sku, category, description, tracking_type,
+      total_quantity: 0, available_quantity: 0
+    });
 
     let inventory = await LabInventory.findOne({ lab_id: labId, item_id: item._id });
 
