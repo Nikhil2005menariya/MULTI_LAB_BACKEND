@@ -917,11 +917,9 @@ exports.searchTransactions = async (req, res) => {
       matchStage.faculty_id = new RegExp(sanitized, 'i');
     }
     if (status) {
-      // Validate status is one of expected values
-      const validStatuses = ['raised', 'active', 'overdue', 'completed', 'cancelled', 'return_requested'];
-      if (validStatuses.includes(status)) {
-        matchStage.status = status;
-      }
+      // Prefix match for debounce queries (e.g., "partial" matches "partial_issued", "partial_returned")
+      const sanitized = escapeRegex(sanitizeText(status.trim(), 50));
+      matchStage.status = new RegExp(`^${sanitized}`, 'i');
     }
 
     /* ── Item filter conditions ── */
@@ -1280,11 +1278,9 @@ exports.searchLabSessions = async (req, res) => {
       filter.faculty_id = escapeRegex(sanitizeText(faculty_id, 50));
     }
     if (status) {
-      // Validate status is expected value
-      const validStatuses = ['raised', 'active', 'overdue', 'completed', 'cancelled'];
-      if (validStatuses.includes(status)) {
-        filter.status = status;
-      }
+      // Prefix match for debounce queries
+      const sanitized = escapeRegex(sanitizeText(status.trim(), 50));
+      filter.status = new RegExp(`^${sanitized}`, 'i');
     }
 
     const [totalItems, records] = await Promise.all([
@@ -1434,10 +1430,9 @@ exports.searchLabTransfers = async (req, res) => {
 
     // Validate status
     if (status) {
-      const validStatuses = ['raised', 'active', 'overdue', 'completed', 'cancelled', 'return_requested'];
-      if (validStatuses.includes(status)) {
-        filter.status = status;
-      }
+      // Prefix match for debounce queries
+      const sanitized = escapeRegex(sanitizeText(status.trim(), 50));
+      filter.status = new RegExp(`^${sanitized}`, 'i');
     }
 
     // Sanitize faculty_name
@@ -1882,7 +1877,7 @@ exports.getDamagedAssetHistory = async (req, res) => {
     // Validate status
     let validatedStatus = null;
     if (status) {
-      const validStatuses = ['damaged', 'under_repair', 'repaired', 'replaced', 'disposed'];
+      const validStatuses = ['damaged', 'under_repair', 'repaired', 'resolved', 'retired'];
       if (validStatuses.includes(status)) {
         validatedStatus = status;
       }
