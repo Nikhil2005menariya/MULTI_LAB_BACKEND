@@ -21,25 +21,35 @@ const saveNotification = async ({ to, txnId, type }) => {
 /* ======================================================
    STATUS RESOLVER
    Never downgrade partial_returned → overdue
+   Never downgrade partial_issued → overdue
    Never touch completed / rejected
 ====================================================== */
 const resolveOverdueStatus = (txn) => {
   if (['completed', 'rejected'].includes(txn.status)) return txn.status;
   if (txn.status === 'partial_returned') return 'partial_returned';
+  if (txn.status === 'partial_issued') return 'partial_issued';
+  
+  // Check if any items have been returned
   const anyReturned = txn.items.some(i => (i.returned_quantity ?? 0) > 0);
   if (anyReturned) return 'partial_returned';
+  
+  // Check if any items have been issued
+  const anyIssued = txn.items.some(i => (i.issued_quantity ?? 0) > 0);
+  if (anyIssued) return 'partial_issued';
+  
   return 'overdue';
 };
 
 /* ======================================================
    PER-LAB ITEM BREAKDOWN
    Groups unreturned items by lab for email rendering
+   Only includes items that were actually issued (issued_quantity > 0)
 ====================================================== */
 const buildItemBreakdown = async (txn) => {
   const pendingItems = txn.items.filter(i => {
-    const issued = i.issued_quantity ?? i.quantity ?? 0;
+    const issued = i.issued_quantity ?? 0;  // Only count actually issued items
     const returned = i.returned_quantity ?? 0;
-    return issued > returned;
+    return issued > 0 && issued > returned;  // Must be issued AND not fully returned
   });
 
   if (pendingItems.length === 0) return [];
@@ -374,7 +384,7 @@ const startDailyOverdueJob = () => {
 
     const transactions = await Transaction.find({
       transaction_type: { $in: ['regular', 'lab_transfer'] },
-      status: { $in: ['approved', 'active', 'partial_returned'] }
+      status: { $in: ['approved', 'active', 'partial_returned', 'partial_issued'] }
     });
 
     for (const txn of transactions) {
@@ -401,11 +411,14 @@ const startDailyOverdueJob = () => {
       // Skip if this urgency level already sent for this transaction
       if (await alreadyNotified(txn.transaction_id, urgency.type)) continue;
 
-      // Skip if all items already returned
-      const allReturned = txn.items.every(i =>
-        (i.returned_quantity ?? 0) >= (i.issued_quantity ?? i.quantity ?? 0)
-      );
-      if (allReturned) continue;
+      // Skip if all ISSUED items already returned (or nothing was issued)
+      const anyIssued = txn.items.some(i => (i.issued_quantity ?? 0) > 0);
+      if (!anyIssued) continue;  // Nothing issued yet, skip notification
+      
+      const allIssuedReturned = txn.items
+        .filter(i => (i.issued_quantity ?? 0) > 0)  // Only consider issued items
+        .every(i => (i.returned_quantity ?? 0) >= (i.issued_quantity ?? 0));
+      if (allIssuedReturned) continue;
 
       const breakdown = await buildItemBreakdown(txn);
       if (breakdown.length === 0) continue;
@@ -469,7 +482,7 @@ const startLabSessionOverdueJob = () => {
 
     const labSessions = await Transaction.find({
       transaction_type: 'lab_session',
-      status: { $in: ['active', 'partial_returned'] }
+      status: { $in: ['active', 'partial_returned', 'partial_issued'] }
     });
 
     for (const txn of labSessions) {
@@ -477,11 +490,14 @@ const startLabSessionOverdueJob = () => {
       // Still within the 2-hour window
       if (new Date(txn.expected_return_date) > now) continue;
 
-      // All returned
-      const allReturned = txn.items.every(i =>
-        (i.returned_quantity ?? 0) >= (i.issued_quantity ?? i.quantity ?? 0)
-      );
-      if (allReturned) continue;
+      // Skip if all ISSUED items already returned (or nothing was issued)
+      const anyIssued = txn.items.some(i => (i.issued_quantity ?? 0) > 0);
+      if (!anyIssued) continue;  // Nothing issued yet, skip notification
+      
+      const allIssuedReturned = txn.items
+        .filter(i => (i.issued_quantity ?? 0) > 0)  // Only consider issued items
+        .every(i => (i.returned_quantity ?? 0) >= (i.issued_quantity ?? 0));
+      if (allIssuedReturned) continue;
 
       // Already sent overdue for this session
       if (await alreadyNotified(txn.transaction_id, 'overdue')) continue;

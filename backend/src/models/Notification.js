@@ -4,7 +4,16 @@ const notificationSchema = new mongoose.Schema(
   {
     type: {
       type: String,
-      enum: ['approval', 'overdue', 'reminder'],
+      enum: [
+        'approval', 
+        'overdue', 
+        'reminder', 
+        'reminder_3d', 
+        'reminder_2d', 
+        'reminder_1d',
+        'auto_reject_not_approved',
+        'auto_reject_not_picked_up'
+      ],
       required: true
     },
 
