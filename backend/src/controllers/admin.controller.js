@@ -320,36 +320,54 @@ exports.addItem = async (req, res) => {
       return res.status(400).json({ error: 'Invalid tracking type' });
     }
 
-    let item = await Item.findOne({ sku });
+    // BUG FIX #1: Check if SKU already exists
+    let item = await Item.findOne({ sku: sku, is_active: true });
 
     if (item) {
-      return res.status(400).json({ error: `An item with SKU "${sku}" already exists. Use a unique SKU.` });
+      // SKU exists - use existing item
+      // Warn if name doesn't match but SKU found
+      if (item.name !== name) {
+        return res.status(400).json({
+          error: `SKU "${sku}" already exists with item name "${item.name}". Use the existing item instead.`,
+          existingItem: {
+            _id: item._id,
+            name: item.name,
+            sku: item.sku,
+            category: item.category,
+            tracking_type: item.tracking_type
+          }
+        });
+      }
+    } else {
+      // SKU doesn't exist - create new item
+      item = await Item.create({
+        name, sku, category, description, tracking_type,
+        total_quantity: 0, available_quantity: 0
+      });
     }
 
-    item = await Item.create({
-      name, sku, category, description, tracking_type,
-      total_quantity: 0, available_quantity: 0
-    });
-
+    // BUG FIX #2: Check if item already exists in this lab
     let inventory = await LabInventory.findOne({ lab_id: labId, item_id: item._id });
 
     if (inventory) {
-      inventory.total_quantity += qty;
-      inventory.reserved_quantity += reservedQty;
-      if (tracking_type === 'bulk') {
-        inventory.available_quantity += (qty - reservedQty);
-      }
-      if (typeof is_student_visible === 'boolean') {
-        inventory.is_student_visible = is_student_visible;
-      }
-      await inventory.save();
-    } else {
-      inventory = await LabInventory.create({
-        lab_id: labId, item_id: item._id,
-        total_quantity: qty, reserved_quantity: reservedQty,
-        available_quantity: qty, is_student_visible
+      // Item already in lab - return error instead of silently updating
+      return res.status(409).json({
+        error: `Item "${item.name}" (${item.sku}) is already present in your lab. Update quantities in the inventory instead.`,
+        existingItem: {
+          _id: item._id,
+          name: item.name,
+          sku: item.sku,
+          currentQuantity: inventory.total_quantity
+        }
       });
     }
+
+    // Create new lab inventory record
+    inventory = await LabInventory.create({
+      lab_id: labId, item_id: item._id,
+      total_quantity: qty, reserved_quantity: reservedQty,
+      available_quantity: qty, is_student_visible
+    });
 
     const createdAssets = [];
 
@@ -686,7 +704,7 @@ exports.getAllItems = async (req, res) => {
     const [totalItems, inventories] = await Promise.all([
       LabInventory.countDocuments({ lab_id: labId }),
       LabInventory.find({ lab_id: labId })
-        .populate({ path: 'item_id', match: itemMatch, select: 'name sku category description tracking_type is_student_visible' })
+        .populate({ path: 'item_id', match: itemMatch, select: 'name sku category description tracking_type' })
         .sort({ createdAt: -1 }).skip(skip).limit(limit).lean()
     ]);
 
@@ -699,7 +717,7 @@ exports.getAllItems = async (req, res) => {
         category: inv.item_id.category,
         description: inv.item_id.description,
         tracking_type: inv.item_id.tracking_type,
-        is_student_visible: inv.item_id.is_student_visible,
+        is_student_visible: inv.is_student_visible,
         total_quantity: inv.total_quantity,
         available_quantity: inv.available_quantity,
         reserved_quantity: inv.reserved_quantity,
@@ -722,6 +740,7 @@ exports.getAllItems = async (req, res) => {
 ============================ */
 exports.searchItemsByPrefix = async (req, res) => {
   try {
+    const labId = req.user.lab_id;
     let { q } = req.query;
     if (!q || q.length < 2) {
       return res.json({ success: true, count: 0, data: [] });
@@ -742,9 +761,24 @@ exports.searchItemsByPrefix = async (req, res) => {
         { sku: { $regex: new RegExp(`^${normalizedSku}`) } }
       ],
       is_active: true
-    }).select('name sku category description tracking_type').limit(10).lean();
+    }).select('_id name sku category description tracking_type').limit(10).lean();
 
-    return res.json({ success: true, count: items.length, data: items });
+    // Check which items are already in this lab's inventory
+    const itemIds = items.map(item => item._id);
+    const labInventoryItems = await LabInventory.find({
+      lab_id: labId,
+      item_id: { $in: itemIds }
+    }).select('item_id').lean();
+
+    const labInventoryItemIds = new Set(labInventoryItems.map(inv => String(inv.item_id)));
+
+    // Add flag to each item indicating if it's already in lab
+    const itemsWithLabFlag = items.map(item => ({
+      ...item,
+      inLabInventory: labInventoryItemIds.has(String(item._id))
+    }));
+
+    return res.json({ success: true, count: itemsWithLabFlag.length, data: itemsWithLabFlag });
 
   } catch (err) {
     console.error('SEARCH ITEMS ERROR:', err);
