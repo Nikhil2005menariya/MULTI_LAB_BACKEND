@@ -137,7 +137,7 @@ exports.getAllItems = async (req, res) => {
             $subtract: [
               {
                 $subtract: [
-                  '$total_quantity',
+                  '$available_quantity',
                   { $ifNull: ['$reserved_quantity', 0] }
                 ]
               },
