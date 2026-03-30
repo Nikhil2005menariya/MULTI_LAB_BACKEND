@@ -1,6 +1,7 @@
 const cron = require('node-cron');
 const Transaction = require('../models/Transaction');
 const Student = require('../models/Student');
+const Staff = require('../models/Staff');
 const Lab = require('../models/Lab');
 const Item = require('../models/Item');
 const Notification = require('../models/Notification');
@@ -353,20 +354,31 @@ const buildLabSessionOverdueEmail = ({ txn, breakdown }) => {
 };
 
 /* ======================================================
-   SEND REMINDER TO STUDENT + FACULTY
+   SEND REMINDER TO STUDENT + FACULTY (BOTH GET EMAILS)
 ====================================================== */
-const sendReminderToParties = async ({ txn, recipientName, studentEmail, breakdown, urgency, isLabTransfer }) => {
-  const subject = `${urgency.emoji} ${urgency.label} – Lab Items (${txn.transaction_id})`;
-  const html = buildReminderEmail({ txn, recipientName, breakdown, urgency, isLabTransfer });
-
+const sendReminderToParties = async ({ txn, studentName, studentEmail, breakdown, urgency, isLabTransfer }) => {
+  // Send to student with student-focused email
   if (studentEmail) {
-    await sendMail({ to: studentEmail, subject, html });
+    const studentSubject = `${urgency.emoji} ${urgency.label} – Lab Items (${txn.transaction_id})`;
+    const studentHtml = buildReminderEmail({ txn, recipientName: studentName, breakdown, urgency, isLabTransfer });
+    await sendMail({ to: studentEmail, subject: studentSubject, html: studentHtml });
     await saveNotification({ to: studentEmail, txnId: txn.transaction_id, type: urgency.type });
   }
 
-  // Also notify faculty (don't save second notification — same txn id + type would deduplicate anyway)
+  // Also notify faculty (NO Faculty schema - faculty might not have account)
+  // Faculty receives similar email with context about their student
   if (txn.faculty_email && txn.faculty_email !== studentEmail) {
-    await sendMail({ to: txn.faculty_email, subject, html });
+    const facultySubject = `${urgency.emoji} ${urgency.label} – Student Project Alert (${txn.transaction_id})`;
+    // Faculty gets same template but addressed generically
+    const facultyHtml = buildReminderEmail({ 
+      txn, 
+      recipientName: `Faculty (Student: ${studentName})`, 
+      breakdown, 
+      urgency, 
+      isLabTransfer 
+    });
+    await sendMail({ to: txn.faculty_email, subject: facultySubject, html: facultyHtml });
+    // Note: We don't save notification for faculty to avoid unique constraint issues
   }
 };
 
@@ -439,7 +451,7 @@ const startDailyOverdueJob = () => {
 
         await sendReminderToParties({
           txn,
-          recipientName: student.name,
+          studentName: student.name,
           studentEmail: student.email,
           breakdown,
           urgency,
@@ -449,20 +461,24 @@ const startDailyOverdueJob = () => {
 
       /* ── Lab transfer ── */
       else if (txn.transaction_type === 'lab_transfer') {
-        const recipient = txn.handover_faculty_email || txn.faculty_email;
-        if (!recipient) continue;
+        // Find incharge of the target lab (the lab that needs to return items)
+        const targetLabId = txn.target_lab_id;
+        if (!targetLabId) continue;
+
+        const incharge = await Staff.findOne({ lab_id: targetLabId, role: 'incharge', is_active: true }).select('name email').lean();
+        if (!incharge) continue;
 
         const subject = `${urgency.emoji} ${urgency.label} – Lab Transfer (${txn.transaction_id})`;
         const html = buildReminderEmail({
           txn,
-          recipientName: 'Lab Incharge',
+          recipientName: incharge.name,
           breakdown,
           urgency,
           isLabTransfer: true
         });
 
-        await sendMail({ to: recipient, subject, html });
-        await saveNotification({ to: recipient, txnId: txn.transaction_id, type: urgency.type });
+        await sendMail({ to: incharge.email, subject, html });
+        await saveNotification({ to: incharge.email, txnId: txn.transaction_id, type: urgency.type });
       }
     }
 
