@@ -2504,7 +2504,14 @@ exports.decideTransferRequest = async (req, res) => {
       }
     }
 
-    transaction.status = 'active';
+    // Permanent transfers are immediately completed (no return expected)
+    // Temporary transfers are active (awaiting return)
+    if (transaction.transfer_type === 'permanent') {
+      transaction.status = 'completed';
+      transaction.actual_return_date = new Date(); // Mark as completed immediately
+    } else {
+      transaction.status = 'active';
+    }
     transaction.issued_at = new Date();
     transaction.issued_by_incharge_id = req.user._id || req.user.id;
     await transaction.save({ session });
@@ -2586,7 +2593,11 @@ exports.completeReturn = async (req, res) => {
           { $set: { status: 'available', last_transaction_id: transaction._id } },
           { session }
         );
-        inventory.available_quantity += item.asset_ids.length;
+        // Recalculate available_quantity from database for consistency
+        const actualAvailable = await ItemAsset.countDocuments({
+          lab_id: labId, item_id: item.item_id, status: 'available'
+        }).session(session);
+        inventory.available_quantity = actualAvailable;
         await inventory.save({ session });
       }
     }
@@ -2728,6 +2739,9 @@ exports.markAssetDamaged = async (req, res) => {
     if (!asset) throw new Error('Asset not found in this lab');
     if (asset.status === 'damaged') throw new Error('Asset is already marked as damaged');
 
+    // Store previous status to correctly update available_quantity
+    const previousAssetStatus = asset.status;
+
     const labObjectId = new mongoose.Types.ObjectId(String(labId));
     const item = await Item.findById(asset.item_id).session(session);
     if (!item) throw new Error('Item not found');
@@ -2781,14 +2795,16 @@ exports.markAssetDamaged = async (req, res) => {
     asset.last_transaction_id = transaction?._id || null;
     await asset.save({ session });
 
-    // Update inventory (move from available/issued to damaged)
+    // Update inventory counts
     const inventory = await LabInventory.findOne({
       lab_id: labObjectId,
       item_id: asset.item_id
     }).session(session);
 
     if (inventory) {
-      if (inventory.available_quantity > 0) {
+      // Only decrement available_quantity if asset was previously 'available'
+      // If it was 'issued', available_quantity was already decremented during issue
+      if (previousAssetStatus === 'available' && inventory.available_quantity > 0) {
         inventory.available_quantity -= 1;
       }
       inventory.damaged_quantity = (inventory.damaged_quantity || 0) + 1;
