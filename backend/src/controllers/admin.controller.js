@@ -1708,8 +1708,8 @@ exports.uploadBill = async (req, res) => {
     }
 
     // Validate required fields
-    if (!title || !bill_date || !invoice_number || !req.file) {
-      return res.status(400).json({ success: false, message: 'Title, bill date, invoice number and PDF file are required' });
+    if (!title || !bill_type || !bill_date || !invoice_number || !req.file) {
+      return res.status(400).json({ success: false, message: 'Title, bill type, bill date, invoice number and PDF file are required' });
     }
 
     // Validate title
@@ -1719,8 +1719,8 @@ exports.uploadBill = async (req, res) => {
     const sanitizedTitle = sanitizeText(title, 200);
 
     // Validate bill_type
-    const validBillTypes = ['purchase', 'maintenance', 'service', 'other'];
-    if (bill_type && !validBillTypes.includes(bill_type)) {
+    const validBillTypes = ['electricity', 'internet', 'maintenance', 'equipment', 'other'];
+    if (!validBillTypes.includes(bill_type)) {
       return res.status(400).json({ success: false, message: 'Invalid bill type' });
     }
 
